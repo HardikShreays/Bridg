@@ -1,0 +1,584 @@
+package com.bridg.service
+
+import android.app.Notification
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
+import android.os.Binder
+import android.os.Build
+import android.os.IBinder
+import android.util.Base64
+import android.util.Log
+import com.bridg.BridgApplication
+import com.bridg.R
+import com.bridg.capture.ScreenCapture
+import com.bridg.clipboard.BridgClipboardManager
+import com.bridg.files.FileTransferManager
+import com.bridg.notify.BridgNotificationListenerService
+import com.bridg.pairing.KeyManager
+import com.bridg.pairing.PairingManager
+import com.bridg.proto.*
+import com.bridg.transport.BridgSocket
+import com.bridg.transport.ServiceDiscovery
+import com.bridg.ui.MainActivity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+
+/**
+ * Foreground service that owns the link to the Mac and every feature that
+ * rides on it: pairing, clipboard, notifications, file transfer, screen capture.
+ */
+class BridgService : Service(), BridgSocket.ConnectionListener {
+
+    private val binder = LocalBinder()
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    private lateinit var keyManager: KeyManager
+    private lateinit var pairingManager: PairingManager
+    private lateinit var bridgSocket: BridgSocket
+    private lateinit var serviceDiscovery: ServiceDiscovery
+
+    private lateinit var screenCapture: ScreenCapture
+    private lateinit var clipboardManager: BridgClipboardManager
+    private lateinit var fileTransferManager: FileTransferManager
+
+    private var mediaProjection: MediaProjection? = null
+    private var isServiceRunning = false
+
+    /** Set by PairingActivity after a successful QR scan; consumed on next connect. */
+    @Volatile private var pendingPairing: PairingManager.QRData? = null
+    @Volatile private var connected = false
+
+    /** Observed by MainActivity for the status line. */
+    @Volatile var statusText: String = "Searching for Mac…"
+        private set
+    var onStatusChanged: ((String) -> Unit)? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        instance = this
+
+        keyManager = KeyManager(this)
+        pairingManager = PairingManager(keyManager)
+        bridgSocket = BridgSocket()
+        serviceDiscovery = ServiceDiscovery(this)
+        screenCapture = ScreenCapture(this)
+        clipboardManager = BridgClipboardManager(this)
+        fileTransferManager = FileTransferManager(this)
+
+        bridgSocket.setConnectionListener(this)
+        bridgSocket.setReceiveListener { envelope -> handleIncomingEnvelope(envelope) }
+
+        // Without this the manager built chunks and discarded them.
+        fileTransferManager.setEnvelopeSender { envelope -> bridgSocket.send(envelope) }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // startForeground must happen fast on every start path or Android kills us.
+        if (!isServiceRunning) startService()
+
+        when (intent?.action) {
+            ACTION_STOP -> stopService()
+            ACTION_PAIR -> {
+                val key = intent.getStringExtra(EXTRA_PEER_PUBKEY)
+                val token = intent.getStringExtra(EXTRA_PAIRING_TOKEN)
+                val name = intent.getStringExtra(EXTRA_PEER_NAME) ?: "Mac"
+                val host = intent.getStringExtra(EXTRA_PEER_HOST).orEmpty()
+                if (key != null && token != null) {
+                    pendingPairing = PairingManager.QRData(Base64.decode(key, Base64.NO_WRAP), token, host, name)
+                    if (host.isNotEmpty()) keyManager.setLastHost(host)
+                    updateStatus("Pairing with $name…")
+                    // Restart the link so the handshake runs from a clean socket.
+                    bridgSocket.disconnect()
+                    connectToKnownHost()
+                }
+            }
+            ACTION_START_CAPTURE -> {
+                val resultData = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(EXTRA_MEDIA_PROJECTION, Intent::class.java)
+                } else {
+                    @Suppress("DEPRECATION") intent.getParcelableExtra(EXTRA_MEDIA_PROJECTION)
+                }
+                // A MediaProjection is not Parcelable; only the consent Intent is.
+                // The old code asked for a MediaProjection extra and always got null,
+                // so screen capture never started.
+                if (resultData != null) startScreenCapture(resultData)
+            }
+            ACTION_SEND_FILE -> {
+                val uri = intent.getStringExtra(EXTRA_FILE_URI)
+                if (uri != null) sendUri(android.net.Uri.parse(uri))
+                else intent.getStringExtra(EXTRA_FILE_PATH)?.let { sendFile(it) }
+            }
+            ACTION_DISCONNECT -> bridgSocket.disconnect()
+        }
+
+        return START_STICKY
+    }
+
+    override fun onBind(intent: Intent): IBinder = binder
+
+    override fun onDestroy() {
+        stopService()
+        if (instance === this) instance = null
+        super.onDestroy()
+    }
+
+    fun isConnected(): Boolean = connected
+
+    fun pairedDeviceCount(): Int = keyManager.getPairedDevices().size
+
+    fun deviceName(): String = keyManager.getDeviceName()
+
+    private fun startService() {
+        isServiceRunning = true
+        // Start as connectedDevice only. The manifest also declares
+        // mediaProjection, and from Android 14 on, going foreground with that
+        // type before the user has granted projection consent is a SecurityException
+        // that kills the process — which is what happened on every launch.
+        startForegroundWithTypes(ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        startDiscovery()
+        startClipboardMonitoring()
+        startNotificationForwarding()
+        Log.i(TAG, "Bridg service started")
+    }
+
+    private fun stopService() {
+        if (!isServiceRunning) return
+        isServiceRunning = false
+
+        screenCapture.stopCapture()
+        clipboardManager.stopMonitoring()
+        serviceDiscovery.stopDiscovery()
+        bridgSocket.disconnect()
+
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+        Log.i(TAG, "Bridg service stopped")
+    }
+
+    /**
+     * Dial the last address we saw the Mac at.
+     *
+     * mDNS is link-local multicast: on a segmented network (campus, office,
+     * guest Wi-Fi) the phone and Mac can route to each other fine while
+     * discovery finds nothing at all. The QR code carries the Mac's address for
+     * exactly this reason, and we keep using it on later reconnects.
+     */
+    private fun connectToKnownHost() {
+        if (connected) return
+        val host = pendingPairing?.host?.ifEmpty { null } ?: keyManager.getLastHost() ?: return
+        scope.launch {
+            if (!connected) {
+                Log.i(TAG, "Trying known host $host:$DEFAULT_PORT")
+                bridgSocket.connect(host, DEFAULT_PORT)
+            }
+        }
+    }
+
+    private fun startDiscovery() {
+        // Both paths race; whichever lands first wins and the other is a no-op.
+        connectToKnownHost()
+
+        serviceDiscovery.startDiscovery(
+            onFound = { serviceInfo ->
+                if (connected) return@startDiscovery
+                serviceDiscovery.resolveService(serviceInfo,
+                    onResolved = { host, port ->
+                        if (connected) return@resolveService
+                        host.hostAddress?.let { keyManager.setLastHost(it) }
+                        // runBlocking on a pooled thread used to stall the executor;
+                        // a coroutine on the IO dispatcher is the right tool here.
+                        scope.launch { bridgSocket.connect(host.hostAddress ?: return@launch, port) }
+                    },
+                    onFailed = { error -> Log.e(TAG, "Failed to resolve service: $error") }
+                )
+            },
+            onLost = { Log.d(TAG, "Mac lost: ${it.serviceName}") }
+        )
+    }
+
+    /**
+     * Announce ourselves as soon as the socket is up: a fresh pairing if the user
+     * just scanned a QR, otherwise a resume against the key we already hold.
+     */
+    private fun startHandshake() {
+        val pairing = pendingPairing
+        if (pairing != null) {
+            val envelope = Envelope.newBuilder()
+                .setPairRequest(pairingManager.createPairRequest(pairing.token))
+                .build()
+            bridgSocket.send(envelope)
+            return
+        }
+
+        val peerKey = keyManager.getPairedPeerPublicKey()
+        if (peerKey == null) {
+            updateStatus("Not paired — scan the QR code on your Mac")
+            return
+        }
+
+        val sharedKey = keyManager.deriveSharedSecret(peerKey)
+        val envelope = Envelope.newBuilder().setPairResume(pairingManager.createPairResume()).build()
+        bridgSocket.sendThenEncrypt(envelope, sharedKey)
+    }
+
+    /**
+     * Push the phone's current clipboard to the Mac.
+     *
+     * Called by [MainActivity] when it comes to the foreground: since Android 10
+     * a background app gets `null` from `getPrimaryClip()`, so the change
+     * listener alone could never send anything and the sync was Mac→phone only.
+     * While an activity of ours holds focus the read is permitted.
+     */
+    fun syncClipboardNow() = clipboardManager.syncCurrentClip()
+
+    private fun startClipboardMonitoring() {
+        clipboardManager.startMonitoring(object : BridgClipboardManager.ClipboardForwarder {
+            override fun onClipboardChanged(update: ClipboardUpdate) {
+                bridgSocket.send(Envelope.newBuilder().setClipboard(update).build())
+            }
+        })
+    }
+
+    /**
+     * Called by [BridgNotificationListenerService] once it connects.
+     *
+     * `NotificationListenerService` is bound by the system on its own schedule,
+     * independent of this service's lifecycle — it can (and in testing,
+     * regularly did) connect *after* both `startService()` and `onConnected()`
+     * already tried to wire it up. Neither of those call sites retried, so the
+     * forwarder was silently never set and notifications never left the phone.
+     * Wiring from this direction too means whichever side comes up last
+     * completes the connection.
+     */
+    fun onNotificationListenerReady() {
+        startNotificationForwarding()
+    }
+
+    /** Hook the notification listener up to the wire. */
+    private fun startNotificationForwarding() {
+        BridgNotificationListenerService.instance?.setEventForwarder(
+            object : BridgNotificationListenerService.NotificationEventForwarder {
+                override fun onNotificationPosted(event: NotificationEvent) {
+                    bridgSocket.send(Envelope.newBuilder().setNotification(event).build())
+                }
+
+                override fun onNotificationDismissed(event: NotificationEvent) {
+                    bridgSocket.send(
+                        Envelope.newBuilder().setNotifDismiss(
+                            NotificationDismiss.newBuilder()
+                                .setId(event.id)
+                                .setPackageName(event.packageName)
+                                .build()
+                        ).build()
+                    )
+                }
+            }
+        )
+    }
+
+    /**
+     * @param consent the Intent returned by the system consent dialog.
+     *
+     * The MediaProjection is minted *here*, not by the caller: from Android 14
+     * on, `getMediaProjection()` requires the service to already be foreground
+     * with `FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION`. The old code evaluated
+     * `getMediaProjection()` as an argument to this function, i.e. before the
+     * `startForegroundWithTypes` call below, and took a SecurityException that
+     * killed the process every time mirroring was started.
+     */
+    private fun startScreenCapture(consent: Intent) {
+        // Consent is in hand, so the mediaProjection type is now legal to claim.
+        startForegroundWithTypes(
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+        )
+
+        val manager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        val projection = try {
+            manager.getMediaProjection(android.app.Activity.RESULT_OK, consent)
+        } catch (e: Exception) {
+            Log.e(TAG, "Screen capture consent rejected: ${e.message}")
+            startForegroundWithTypes(ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            updateStatus("Screen mirroring unavailable")
+            return
+        }
+
+        mediaProjection = projection
+        screenCapture.startCapture(projection, object : ScreenCapture.FrameCallback {
+            override fun onConfigFrame(spsPps: ByteArray) {
+                bridgSocket.send(
+                    Envelope.newBuilder().setVideoStreamStart(
+                        VideoStreamStart.newBuilder()
+                            .setStreamType(VideoStreamStart.StreamType.SCREEN)
+                            // Must match what the encoder was actually configured
+                            // with, not the raw panel size.
+                            .setWidth(screenCapture.width)
+                            .setHeight(screenCapture.height)
+                            .setFps(30)
+                            .setSpsPps(com.google.protobuf.ByteString.copyFrom(spsPps))
+                            .build()
+                    ).build()
+                )
+            }
+
+            override fun onVideoFrame(nalUnits: ByteArray, pts: Long, isKeyframe: Boolean) {
+                bridgSocket.send(
+                    Envelope.newBuilder().setVideoFrame(
+                        VideoFrame.newBuilder()
+                            .setStreamId("screen")
+                            .setNalUnits(com.google.protobuf.ByteString.copyFrom(nalUnits))
+                            .setPts(pts)
+                            .setIsKeyframe(isKeyframe)
+                            .build()
+                    ).build()
+                )
+            }
+        })
+    }
+
+    /**
+     * Send a file the user picked through the system share sheet.
+     *
+     * A share sheet hands over a content:// Uri, not a path — nothing outside
+     * the app's own storage can be opened as a raw `File` under scoped storage,
+     * so [sendFile] could never have served the share path.
+     */
+    private fun sendUri(uri: android.net.Uri) {
+        var name = uri.lastPathSegment?.substringAfterLast('/') ?: "file"
+        var size = 0L
+
+        contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    .takeIf { it >= 0 && !cursor.isNull(it) }
+                    ?.let { name = cursor.getString(it) }
+                cursor.getColumnIndex(android.provider.OpenableColumns.SIZE)
+                    .takeIf { it >= 0 && !cursor.isNull(it) }
+                    ?.let { size = cursor.getLong(it) }
+            }
+        }
+
+        val stream = try {
+            contentResolver.openInputStream(uri)
+        } catch (e: Exception) {
+            Log.e(TAG, "Cannot read $uri: ${e.message}")
+            null
+        }
+        if (stream == null) {
+            updateStatus("Could not read the shared file")
+            return
+        }
+        if (size <= 0L) {
+            // A provider is allowed to report no size; without one the receiver
+            // never sees the transfer finish, so refuse rather than hang.
+            Log.e(TAG, "Provider reported no size for $uri")
+            stream.close()
+            updateStatus("Shared file has no readable size")
+            return
+        }
+
+        updateStatus("Sending $name…")
+        fileTransferManager.startSend(
+            stream, name, size,
+            contentResolver.getType(uri) ?: "application/octet-stream"
+        )
+    }
+
+    private fun sendFile(filePath: String) {
+        val file = java.io.File(filePath)
+        // A raw File path outside the app's own storage can pass exists() (a
+        // stat()) and still fail to open under scoped storage — this used to
+        // throw uncaught out of onStartCommand and crash the whole service,
+        // taking the phone-Mac connection down with it over one bad file path.
+        val stream = try {
+            if (!file.exists()) throw java.io.FileNotFoundException("$filePath does not exist")
+            file.inputStream()
+        } catch (e: Exception) {
+            Log.e(TAG, "Cannot read $filePath: ${e.message}")
+            return
+        }
+        fileTransferManager.startSend(stream, file.name, file.length(), "application/octet-stream")
+    }
+
+    private fun handleIncomingEnvelope(envelope: Envelope) {
+        when (envelope.payloadCase) {
+            Envelope.PayloadCase.PAIR_RESPONSE -> {
+                val pairing = pendingPairing ?: return
+                val peerKey = pairingManager.verifyPairResponse(envelope.pairResponse, pairing.publicKey)
+                if (peerKey == null) {
+                    updateStatus("Pairing failed")
+                    return
+                }
+                pairingManager.completePairing(peerKey, envelope.pairResponse.deviceName)
+                pendingPairing = null
+                bridgSocket.setEncryptionKey(keyManager.deriveSharedSecret(peerKey))
+                updateStatus("Paired with ${envelope.pairResponse.deviceName}")
+            }
+
+            Envelope.PayloadCase.PAIR_RESUME_ACK -> {
+                // Arriving decrypted at all proves both sides hold the same key.
+                if (envelope.pairResumeAck.accepted) updateStatus("Connected to Mac")
+                else updateStatus("Mac rejected the connection — re-pair")
+            }
+
+            Envelope.PayloadCase.CLIPBOARD -> clipboardManager.handleRemoteClipboard(envelope.clipboard)
+
+            Envelope.PayloadCase.NOTIF_ACTION -> {
+                BridgNotificationListenerService.instance?.handleReplyAction(
+                    envelope.notifAction.actionId,
+                    envelope.notifAction.label
+                )
+            }
+
+            Envelope.PayloadCase.FILE_START -> {
+                // Opening the destination can fail (storage full, provider says
+                // no). It runs on the socket read thread, so an escape here
+                // takes down the whole link.
+                try {
+                    val outputStream = fileTransferManager.createReceiveFile(envelope.fileStart.filename)
+                    fileTransferManager.handleTransferStart(envelope.fileStart, outputStream)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Cannot receive ${envelope.fileStart.filename}: ${e.message}")
+                    bridgSocket.send(
+                        Envelope.newBuilder().setFileAck(
+                            FileTransferAck.newBuilder()
+                                .setTransferId(envelope.fileStart.transferId)
+                                .setError(e.message ?: "Cannot open destination")
+                                .build()
+                        ).build()
+                    )
+                }
+            }
+
+            Envelope.PayloadCase.FILE_CHUNK -> {
+                bridgSocket.send(
+                    Envelope.newBuilder()
+                        .setFileAck(fileTransferManager.handleFileChunk(envelope.fileChunk))
+                        .build()
+                )
+            }
+
+            Envelope.PayloadCase.FILE_ACK -> fileTransferManager.handleAck(envelope.fileAck)
+
+            Envelope.PayloadCase.INPUT_EVENT -> {
+                com.bridg.input.BridgAccessibilityService.instance?.dispatchInputEvent(envelope.inputEvent)
+            }
+
+            Envelope.PayloadCase.PING -> {
+                bridgSocket.send(
+                    Envelope.newBuilder().setPong(
+                        Pong.newBuilder()
+                            .setTimestamp(System.currentTimeMillis())
+                            .setPingTimestamp(envelope.ping.timestamp)
+                            .build()
+                    ).build()
+                )
+            }
+
+            Envelope.PayloadCase.PONG -> Unit
+
+            else -> Log.d(TAG, "Unhandled envelope type: ${envelope.payloadCase}")
+        }
+    }
+
+    private fun startForegroundWithTypes(types: Int) {
+        val notification = createNotification(statusText)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, notification, types)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun createNotification(contentText: String): Notification {
+        val pendingIntent = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE
+        )
+
+        return Notification.Builder(this, BridgApplication.CHANNEL_SERVICE)
+            .setContentTitle("Bridg")
+            .setContentText(contentText)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .build()
+    }
+
+    // ─── ConnectionListener ────────────────────────────────────────────────────
+
+    override fun onConnected() {
+        connected = true
+        updateStatus("Connected — handshaking…")
+        startHandshake()
+        // The listener may have bound after the service started.
+        startNotificationForwarding()
+    }
+
+    override fun onDisconnected() {
+        connected = false
+        bridgSocket.clearEncryption()
+        updateStatus("Disconnected — searching…")
+    }
+
+    override fun onConnectionFailed(error: Exception) {
+        connected = false
+        Log.e(TAG, "Connection failed: ${error.message}")
+        updateStatus("Connection failed — retrying…")
+    }
+
+    override fun onConnectionLost(error: Exception) {
+        connected = false
+        bridgSocket.clearEncryption()
+        Log.e(TAG, "Connection lost: ${error.message}")
+        updateStatus("Reconnecting…")
+        // Rebuild the browse so a new resolve fires and we dial back in.
+        serviceDiscovery.stopDiscovery()
+        startDiscovery()
+    }
+
+    private fun updateStatus(text: String) {
+        statusText = text
+        onStatusChanged?.invoke(text)
+        if (!isServiceRunning) return
+        val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
+        manager.notify(NOTIFICATION_ID, createNotification(text))
+    }
+
+    inner class LocalBinder : Binder() {
+        fun getService(): BridgService = this@BridgService
+    }
+
+    companion object {
+        private const val TAG = "BridgService"
+        private const val NOTIFICATION_ID = 1
+
+        /** Same pattern as [BridgNotificationListenerService.instance]: lets an
+         *  independently-lifecycled system service find us without a bind. */
+        var instance: BridgService? = null
+            private set
+
+        const val ACTION_START = "com.bridg.action.START"
+        const val ACTION_STOP = "com.bridg.action.STOP"
+        const val ACTION_PAIR = "com.bridg.action.PAIR"
+        const val ACTION_START_CAPTURE = "com.bridg.action.START_CAPTURE"
+        const val ACTION_SEND_FILE = "com.bridg.action.SEND_FILE"
+        const val ACTION_DISCONNECT = "com.bridg.action.DISCONNECT"
+
+        const val EXTRA_MEDIA_PROJECTION = "media_projection"
+        const val EXTRA_FILE_PATH = "file_path"
+        const val EXTRA_FILE_URI = "file_uri"
+        const val EXTRA_PEER_PUBKEY = "peer_pubkey"
+        const val EXTRA_PEER_NAME = "peer_name"
+        const val EXTRA_PEER_HOST = "peer_host"
+        const val DEFAULT_PORT = 18920
+        const val EXTRA_PAIRING_TOKEN = "pairing_token"
+    }
+}

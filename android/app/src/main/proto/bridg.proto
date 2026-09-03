@@ -1,0 +1,228 @@
+syntax = "proto3";
+package bridg;
+option java_package = "com.bridg.proto";
+option java_multiple_files = true;
+option swift_prefix = "BridgProto";
+
+// ─── Envelope ────────────────────────────────────────────────────────────────
+
+// Every message on the wire is wrapped in this envelope.
+// Transport is length-prefixed: 4-byte big-endian length + serialized Envelope.
+message Envelope {
+  uint64 id = 1;
+  oneof payload {
+    PairRequest pair_request = 10;
+    PairResponse pair_response = 11;
+    PairResume pair_resume = 12;
+    PairResumeAck pair_resume_ack = 13;
+
+    FileTransferStart file_start = 20;
+    FileChunk file_chunk = 21;
+    FileTransferAck file_ack = 22;
+    FileTransferCancel file_cancel = 23;
+
+    ClipboardUpdate clipboard = 30;
+
+    NotificationEvent notification = 40;
+    NotificationAction notif_action = 41;
+    NotificationDismiss notif_dismiss = 42;
+
+    InputEvent input_event = 50;
+
+    VideoFrame video_frame = 60;
+    VideoStreamStart video_stream_start = 61;
+    VideoStreamStop video_stream_stop = 62;
+
+    Ping ping = 100;
+    Pong pong = 101;
+
+    SessionLock session_lock = 110;
+    SessionLockRelease session_lock_release = 111;
+  }
+}
+
+// ─── Pairing ─────────────────────────────────────────────────────────────────
+
+message PairRequest {
+  bytes sender_pubkey = 1;     // X25519 public key (32 bytes)
+  string device_name = 2;      // Human-readable device name
+  string pairing_token = 3;    // Token shown in QR for verification
+}
+
+message PairResponse {
+  bytes responder_pubkey = 1;  // X25519 public key (32 bytes)
+  string device_name = 2;
+  bytes signature = 3;         // Ed25519 signature of shared_context for verification
+  bool accepted = 4;
+}
+
+message PairResume {
+  bytes device_pubkey_hash = 1; // SHA-256 hash of the paired device's public key
+  bytes signed_nonce = 2;       // Ed25519 signature of challenge nonce
+  uint64 timestamp = 3;         // Unix timestamp to prevent replay
+}
+
+message PairResumeAck {
+  bytes signed_nonce = 1;       // Responder's signed nonce for mutual auth
+  bool accepted = 2;
+}
+
+// ─── File Transfer ───────────────────────────────────────────────────────────
+
+message FileTransferStart {
+  string filename = 1;
+  uint64 size = 2;              // Total file size in bytes
+  string checksum = 3;          // SHA-256 hex digest
+  string transfer_id = 4;       // Unique transfer identifier
+  string mime_type = 5;
+}
+
+message FileChunk {
+  string transfer_id = 1;
+  uint64 offset = 2;            // Byte offset for resume support
+  bytes data = 3;               // Raw file data (≤64KB per chunk)
+}
+
+message FileTransferAck {
+  string transfer_id = 1;
+  uint64 bytes_received = 2;    // Last successfully written offset
+  bool complete = 3;
+  string error = 4;             // Empty if no error
+}
+
+message FileTransferCancel {
+  string transfer_id = 1;
+  string reason = 2;
+}
+
+// ─── Clipboard ───────────────────────────────────────────────────────────────
+
+message ClipboardUpdate {
+  string content = 1;           // Text content (empty if image-only)
+  bytes image_data = 2;         // Optional: raw image bytes (≤5MB)
+  string mime_type = 3;         // e.g. "text/plain", "image/png"
+  uint64 timestamp = 4;
+  string origin_id = 5;         // Device ID that originated this clip (for echo prevention)
+}
+
+// ─── Notifications ───────────────────────────────────────────────────────────
+
+message NotificationEvent {
+  string id = 1;                // Unique notification identifier
+  string package_name = 2;      // Android package name
+  string app_label = 3;         // Human-readable app name
+  string title = 4;
+  string text = 5;
+  int64 timestamp = 6;          // Unix timestamp ms
+  bool is_group_summary = 7;
+  bool has_reply_action = 8;    // Whether RemoteInput is present
+  repeated NotificationAction actions = 9;
+  bytes large_icon = 10;        // Optional large icon bitmap
+}
+
+message NotificationAction {
+  string action_id = 1;         // Unique action identifier
+  string label = 2;             // Button label
+  bool is_reply = 3;            // Whether this triggers a reply input
+}
+
+message NotificationDismiss {
+  string id = 1;                // Notification ID to dismiss
+  string package_name = 2;
+}
+
+// ─── Input ───────────────────────────────────────────────────────────────────
+
+message InputEvent {
+  enum EventType {
+    EVENT_TYPE_UNSPECIFIED = 0;
+    TAP = 1;
+    DOUBLE_TAP = 2;
+    LONG_PRESS = 3;
+    SWIPE = 4;
+    PINCH = 5;
+    KEY_DOWN = 6;
+    KEY_UP = 7;
+    TEXT_INPUT = 8;
+    BACK = 9;
+    HOME = 10;
+    RECENTS = 11;
+    VOLUME_UP = 12;
+    VOLUME_DOWN = 13;
+    POWER = 14;
+    SWITCH_APP = 15;
+  }
+
+  EventType type = 1;
+
+  // Touch coordinates (normalized 0.0–1.0 relative to screen)
+  float x = 2;
+  float y = 3;
+  float x2 = 4;                // For pinch/swipe end point
+  float y2 = 5;
+  float velocity_x = 6;        // For fling gestures
+  float velocity_y = 7;
+
+  // Key events
+  int32 keycode = 8;            // Android KeyEvent keycode
+  int32 meta_state = 9;         // Modifier keys bitmask
+
+  // Text input
+  string text = 10;
+
+  // Timestamp for ordering
+  uint64 timestamp = 11;
+}
+
+// ─── Video ───────────────────────────────────────────────────────────────────
+
+message VideoStreamStart {
+  enum StreamType {
+    SCREEN = 0;
+    CAMERA = 1;
+  }
+  StreamType stream_type = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  uint32 fps = 4;
+  bytes sps_pps = 5;            // H.264 SPS/PPS NAL units for decoder init
+}
+
+message VideoFrame {
+  string stream_id = 1;         // Distinguishes screen vs camera streams
+  bytes nal_units = 2;          // H.264 NAL unit data
+  uint64 pts = 3;               // Presentation timestamp (us)
+  bool is_keyframe = 4;
+  bool is_config = 5;           // True for SPS/PPS updates
+}
+
+message VideoStreamStop {
+  string stream_id = 1;
+}
+
+// ─── Session Management ─────────────────────────────────────────────────────
+
+message SessionLock {
+  string holder_id = 1;         // Device holding the exclusive session
+  string holder_name = 2;
+  enum SessionType {
+    MIRROR = 0;
+    CAMERA = 1;
+  }
+  SessionType session_type = 3;
+}
+
+message SessionLockRelease {
+  string holder_id = 1;
+}
+
+// ─── Keepalive ───────────────────────────────────────────────────────────────
+
+message Ping {
+  uint64 timestamp = 1;
+}
+
+message Pong {
+  uint64 timestamp = 1;
+  uint64 ping_timestamp = 2;    // Echo back the ping's timestamp
+}

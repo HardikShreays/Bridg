@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Bridg</string>
+    <string name="notification_channel_name">Bridg Service</string>
+    <string name="notification_channel_description">Persistent connection to Mac</string>
+    <string name="notification_transfer_title">File Transfer</string>
+    <string name="notification_transfer_in_progress">Transferring files…</string>
+    <string name="pairing_title">Pair with Mac</string>
+    <string name="pairing_scan_qr">Scan QR code on your Mac</string>
+    <string name="pairing_success">Pairing successful!</string>
+    <string name="pairing_failed">Pairing failed. Please try again.</string>
+    <string name="accessibility_service_description">Bridg needs Accessibility access to inject tap, swipe, and keyboard input on your phone from your Mac.</string>
+    <string name="notification_listener_description">Bridg needs Notification access to forward your phone notifications to your Mac.</string>
+</resources>

@@ -1,0 +1,35 @@
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/*.iml
+android/captures/
+android/externalNativeBuild/
+android/.cxx/
+
+# Mac
+mac/.build/
+mac/.swiftpm/
+mac/DerivedData/
+mac/*.xcodeproj/project.xcworkspace/xcuserdata/
+mac/*.xcodeproj/xcuserdata/
+mac/Packages/
+
+# Protobuf generated
+proto/gen/
+**/*.pb.swift
+**/*.pb.swift.h
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.iml

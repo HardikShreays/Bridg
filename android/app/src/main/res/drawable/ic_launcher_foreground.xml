@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Simple "B" letter shape for Bridg -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,30 L38,78 L58,78 C66,78 72,72 72,64 C72,58 68,53 62,51 C67,49 70,44 70,39 C70,32 65,30 58,30 Z M48,38 L56,38 C60,38 62,40 62,44 C62,48 60,50 56,50 L48,50 Z M48,58 L58,58 C62,58 64,60 64,64 C64,68 62,70 58,70 L48,70 Z"/>
+</vector>
