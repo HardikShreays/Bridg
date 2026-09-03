@@ -8,7 +8,8 @@ class FileTransferManager {
     private let downloadDirectory: URL
     private var activeTransfers: [String: TransferState] = [:]
 
-    var onTransferStarted: ((String, String, Int64) -> Void)?
+    /// id, filename, size, isOutgoing (true = we are sending it to the phone).
+    var onTransferStarted: ((String, String, Int64, Bool) -> Void)?
     var onTransferProgress: ((String, Int64, Int64) -> Void)?
     var onTransferCompleted: ((String, URL) -> Void)?
     var onTransferError: ((String, String) -> Void)?
@@ -54,7 +55,7 @@ class FileTransferManager {
         )
         activeTransfers[transferId] = state
 
-        onTransferStarted?(transferId, filename, fileSize)
+        onTransferStarted?(transferId, filename, fileSize, true)
 
         var envelope = BridgProtoEnvelope()
         envelope.fileStart = startMsg
@@ -102,7 +103,7 @@ class FileTransferManager {
         // FileHandle(forWritingTo:) throws unless the file already exists.
         FileManager.default.createFile(atPath: targetURL.path, contents: nil)
 
-        onTransferStarted?(transferId, filename, Int64(start.size))
+        onTransferStarted?(transferId, filename, Int64(start.size), false)
     }
 
     /// Handle a FileChunk from Android.

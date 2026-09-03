@@ -207,12 +207,30 @@ struct FileTransferView: View {
 
     var body: some View {
         VStack {
+            if let error = appState.lastTransferError {
+                HStack {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.red)
+                    Text(error)
+                        .font(.caption)
+                    Spacer()
+                    Button("Dismiss") { appState.lastTransferError = nil }
+                        .buttonStyle(.plain)
+                        .font(.caption)
+                }
+                .padding(8)
+                .background(Color.red.opacity(0.1))
+                .cornerRadius(6)
+            }
+
             if appState.activeTransfers.isEmpty {
                 Text("No active transfers")
                     .foregroundColor(.secondary)
             } else {
                 List(appState.activeTransfers) { transfer in
                     HStack {
+                        Image(systemName: transfer.direction == .outgoing ? "arrow.up.circle" : "arrow.down.circle")
+                            .foregroundColor(.secondary)
                         Text(transfer.filename)
                         Spacer()
                         ProgressView(value: transfer.progress)
@@ -232,6 +250,7 @@ struct FileTransferView: View {
             }
             .disabled(!appState.connectionState.isConnected)
         }
+        .padding(.top, appState.lastTransferError != nil ? 8 : 0)
         .navigationTitle("File Transfer")
     }
 }

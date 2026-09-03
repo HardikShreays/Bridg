@@ -310,36 +310,49 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
         }
 
         mediaProjection = projection
-        screenCapture.startCapture(projection, object : ScreenCapture.FrameCallback {
-            override fun onConfigFrame(spsPps: ByteArray) {
-                bridgSocket.send(
-                    Envelope.newBuilder().setVideoStreamStart(
-                        VideoStreamStart.newBuilder()
-                            .setStreamType(VideoStreamStart.StreamType.SCREEN)
-                            // Must match what the encoder was actually configured
-                            // with, not the raw panel size.
-                            .setWidth(screenCapture.width)
-                            .setHeight(screenCapture.height)
-                            .setFps(30)
-                            .setSpsPps(com.google.protobuf.ByteString.copyFrom(spsPps))
-                            .build()
-                    ).build()
-                )
-            }
 
-            override fun onVideoFrame(nalUnits: ByteArray, pts: Long, isKeyframe: Boolean) {
-                bridgSocket.send(
-                    Envelope.newBuilder().setVideoFrame(
-                        VideoFrame.newBuilder()
-                            .setStreamId("screen")
-                            .setNalUnits(com.google.protobuf.ByteString.copyFrom(nalUnits))
-                            .setPts(pts)
-                            .setIsKeyframe(isKeyframe)
-                            .build()
-                    ).build()
-                )
-            }
-        })
+        // MediaCodec/VirtualDisplay setup is device-dependent and can throw
+        // (an unsupported size, a codec the device doesn't have). Uncaught,
+        // that used to kill the whole foreground service — and with it the
+        // Mac connection — over a phone-specific quirk that has nothing to do
+        // with pairing or transport.
+        try {
+            screenCapture.startCapture(projection, object : ScreenCapture.FrameCallback {
+                override fun onConfigFrame(spsPps: ByteArray) {
+                    bridgSocket.send(
+                        Envelope.newBuilder().setVideoStreamStart(
+                            VideoStreamStart.newBuilder()
+                                .setStreamType(VideoStreamStart.StreamType.SCREEN)
+                                // Must match what the encoder was actually configured
+                                // with, not the raw panel size.
+                                .setWidth(screenCapture.width)
+                                .setHeight(screenCapture.height)
+                                .setFps(30)
+                                .setSpsPps(com.google.protobuf.ByteString.copyFrom(spsPps))
+                                .build()
+                        ).build()
+                    )
+                }
+
+                override fun onVideoFrame(nalUnits: ByteArray, pts: Long, isKeyframe: Boolean) {
+                    bridgSocket.send(
+                        Envelope.newBuilder().setVideoFrame(
+                            VideoFrame.newBuilder()
+                                .setStreamId("screen")
+                                .setNalUnits(com.google.protobuf.ByteString.copyFrom(nalUnits))
+                                .setPts(pts)
+                                .setIsKeyframe(isKeyframe)
+                                .build()
+                        ).build()
+                    )
+                }
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start screen capture: ${e.message}")
+            this.mediaProjection = null
+            startForegroundWithTypes(ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            updateStatus("Screen mirroring unavailable on this device")
+        }
     }
 
     /**

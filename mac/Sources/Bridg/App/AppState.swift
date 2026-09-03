@@ -21,6 +21,9 @@ final class AppState: ObservableObject {
     @Published var mirrorAspectRatio: CGFloat = 9.0 / 16.0
     @Published var notificationHistory: [NotificationItem] = []
     @Published var activeTransfers: [TransferInfo] = []
+    /// Set on any failed transfer so `FileTransferView` can show it, instead
+    /// of the transfer just silently disappearing from the list.
+    @Published var lastTransferError: String?
 
     /// QR image shown while pairing, plus the token the phone must echo back.
     @Published var pairingQRCode: NSImage?
@@ -142,10 +145,13 @@ final class AppState: ObservableObject {
         fileTransferManager.onSendEnvelope = { [weak self] envelope in
             self?.connectionManager.send(envelope)
         }
-        fileTransferManager.onTransferStarted = { [weak self] id, filename, size in
+        fileTransferManager.onTransferStarted = { [weak self] id, filename, size, isOutgoing in
             Task { @MainActor in
                 self?.activeTransfers.append(
-                    TransferInfo(id: id, filename: filename, totalSize: size, bytesTransferred: 0, direction: .incoming)
+                    TransferInfo(
+                        id: id, filename: filename, totalSize: size, bytesTransferred: 0,
+                        direction: isOutgoing ? .outgoing : .incoming
+                    )
                 )
             }
         }
@@ -158,9 +164,12 @@ final class AppState: ObservableObject {
         fileTransferManager.onTransferCompleted = { [weak self] id, _ in
             Task { @MainActor in self?.activeTransfers.removeAll { $0.id == id } }
         }
+        // Errors used to only print to the console — a failed transfer just
+        // vanished from the list with nothing to tell the user why.
         fileTransferManager.onTransferError = { [weak self] id, message in
             Task { @MainActor in
                 self?.activeTransfers.removeAll { $0.id == id }
+                self?.lastTransferError = message
                 print("Transfer \(id) failed: \(message)")
             }
         }
@@ -279,7 +288,7 @@ struct TransferInfo: Identifiable {
     var bytesTransferred: Int64
     let direction: Direction
 
-    enum Direction { case incoming, outgoing }
+    enum Direction: Equatable { case incoming, outgoing }
 
     var progress: Double {
         guard totalSize > 0 else { return 0 }

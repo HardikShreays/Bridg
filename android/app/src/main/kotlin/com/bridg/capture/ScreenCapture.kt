@@ -52,22 +52,36 @@ class ScreenCapture(private val context: Context) {
         captureThread = HandlerThread("ScreenCapture").apply { start() }
         captureHandler = Handler(captureThread!!.looper)
 
-        setupEncoder()
+        // Any of these can throw on a given device (an unsupported size or
+        // encoder rejection, a VirtualDisplay refusal). Uncaught, that took
+        // down the whole foreground service. Roll back and hand the caller a
+        // clean failure instead.
+        try {
+            setupEncoder()
 
-        // From API 34 on, createVirtualDisplay() throws IllegalStateException if
-        // no MediaProjection.Callback has been registered yet — which crashed the
-        // app the moment mirroring was started. Registration must come first.
-        //
-        // The callback runs on the main looper, not captureHandler: the capture
-        // thread is blocked in the drain loop below and would never deliver it.
-        projection.registerCallback(object : MediaProjection.Callback() {
-            override fun onStop() {
-                Log.i(TAG, "MediaProjection stopped")
-                stopCapture()
-            }
-        }, Handler(Looper.getMainLooper()))
+            // From API 34 on, createVirtualDisplay() throws IllegalStateException
+            // if no MediaProjection.Callback has been registered yet. Registration
+            // must come first.
+            //
+            // The callback runs on the main looper, not captureHandler: the capture
+            // thread is blocked in the drain loop below and would never deliver it.
+            projection.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() {
+                    Log.i(TAG, "MediaProjection stopped")
+                    stopCapture()
+                }
+            }, Handler(Looper.getMainLooper()))
 
-        setupVirtualDisplay()
+            setupVirtualDisplay()
+            if (virtualDisplay == null) throw IllegalStateException("createVirtualDisplay returned null")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start capture: ${e.message}")
+            releaseResources()
+            captureThread?.quitSafely()
+            captureThread = null
+            captureHandler = null
+            throw e
+        }
 
         isCapturing = true
         // Nothing ever called drainEncoder(), so no encoded frame ever left the
@@ -82,6 +96,13 @@ class ScreenCapture(private val context: Context) {
      * The old code hardcoded 1080x1920 while the service advertised the true
      * display metrics to the Mac, so the decoder was told dimensions the stream
      * never had.
+     *
+     * Rounding to even was not enough: hardware AVC encoders lay frames out on
+     * a 16x16 macroblock grid and most reject any other size outright —
+     * `configure()` throws `MediaCodec.CodecException`, uncaught, straight out
+     * of a foreground service. Almost every real panel (1080x2340, 1080x2400,
+     * 1440x3200...) has a short edge that is even but not a multiple of 16, so
+     * this crashed on the first tap of "Start Capture" on most phones.
      */
     private fun resolveCaptureSize() {
         val metrics = context.resources.displayMetrics
@@ -89,10 +110,11 @@ class ScreenCapture(private val context: Context) {
         val h = metrics.heightPixels
         val shortEdge = minOf(w, h)
         val scale = if (shortEdge > MAX_SHORT_EDGE) MAX_SHORT_EDGE.toFloat() / shortEdge else 1f
-        // H.264 requires even dimensions.
-        width = ((w * scale).toInt() / 2) * 2
-        height = ((h * scale).toInt() / 2) * 2
+        width = alignTo16((w * scale).toInt())
+        height = alignTo16((h * scale).toInt())
     }
+
+    private fun alignTo16(value: Int) = (value / 16) * 16
 
     /**
      * Stop screen capture and release resources.
@@ -107,38 +129,7 @@ class ScreenCapture(private val context: Context) {
         val handler = captureHandler
         val thread = captureThread
         val teardown = Runnable {
-            try {
-                encoder?.signalEndOfInputStream()
-                encoder?.stop()
-                encoder?.release()
-            } catch (e: Exception) {
-                Log.w(TAG, "Error stopping encoder: ${e.message}")
-            }
-
-            try {
-                virtualDisplay?.release()
-            } catch (e: Exception) {
-                Log.w(TAG, "Error releasing virtual display: ${e.message}")
-            }
-
-            try {
-                inputSurface?.release()
-            } catch (e: Exception) {
-                Log.w(TAG, "Error releasing input surface: ${e.message}")
-            }
-
-            try {
-                mediaProjection?.stop()
-            } catch (e: Exception) {
-                Log.w(TAG, "Error stopping projection: ${e.message}")
-            }
-
-            encoder = null
-            inputSurface = null
-            virtualDisplay = null
-            mediaProjection = null
-            frameCallback = null
-
+            releaseResources()
             thread?.quitSafely()
             Log.i(TAG, "Screen capture stopped")
         }
@@ -146,6 +137,46 @@ class ScreenCapture(private val context: Context) {
         if (handler == null || !handler.post(teardown)) teardown.run()
         captureThread = null
         captureHandler = null
+    }
+
+    /**
+     * Release whatever got created, in whatever order it got created in.
+     * Shared by the normal stop path and the startCapture() failure path —
+     * a setup that dies partway through must not leak the pieces that did
+     * come up (codec, surface, virtual display, the projection token).
+     */
+    private fun releaseResources() {
+        try {
+            encoder?.signalEndOfInputStream()
+            encoder?.stop()
+            encoder?.release()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error stopping encoder: ${e.message}")
+        }
+
+        try {
+            virtualDisplay?.release()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error releasing virtual display: ${e.message}")
+        }
+
+        try {
+            inputSurface?.release()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error releasing input surface: ${e.message}")
+        }
+
+        try {
+            mediaProjection?.stop()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error stopping projection: ${e.message}")
+        }
+
+        encoder = null
+        inputSurface = null
+        virtualDisplay = null
+        mediaProjection = null
+        frameCallback = null
     }
 
     /**

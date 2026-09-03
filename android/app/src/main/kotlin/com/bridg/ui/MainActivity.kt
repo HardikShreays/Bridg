@@ -59,6 +59,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** In-app counterpart to the share-sheet path: pick a file, send it. */
+    private val filePickerLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris -> sendUris(uris) }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -80,6 +85,14 @@ class MainActivity : AppCompatActivity() {
             mediaProjectionLauncher.launch(manager.createScreenCaptureIntent())
         }
 
+        binding.btnSendFile.setOnClickListener {
+            if (bridgService?.isConnected() != true) {
+                Toast.makeText(this, "Connect to your Mac first", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            filePickerLauncher.launch(arrayOf("*/*"))
+        }
+
         val serviceIntent = Intent(this, BridgService::class.java).apply {
             action = BridgService.ACTION_START
         }
@@ -98,9 +111,9 @@ class MainActivity : AppCompatActivity() {
     /**
      * Take files handed to us by the system share sheet and push them to the Mac.
      *
-     * This is the only way to send a file *from* the phone: the app had no
-     * send UI at all, and ACTION_SEND is the idiomatic Android entry point
-     * rather than a bespoke file browser.
+     * ACTION_SEND from another app is one entry point; [btnSendFile]'s document
+     * picker is the other, for a file the user wants to send starting from
+     * inside Bridg itself.
      */
     private fun handleShare(intent: Intent?) {
         val uris: List<android.net.Uri> = when (intent?.action) {
@@ -121,9 +134,27 @@ class MainActivity : AppCompatActivity() {
                 }
             else -> emptyList()
         }
+        sendUris(uris)
+    }
+
+    private fun sendUris(uris: List<android.net.Uri>) {
         if (uris.isEmpty()) return
 
+        if (bridgService?.isConnected() != true) {
+            Toast.makeText(this, "Connect to your Mac first", Toast.LENGTH_SHORT).show()
+            return
+        }
+
         for (uri in uris) {
+            // Best-effort: hold the read grant past this call. BridgService
+            // opens the Uri moments later on its own thread, and a transient
+            // grant from some providers can already be gone by then.
+            try {
+                contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } catch (e: SecurityException) {
+                // Not every provider grants persistable access; the immediate
+                // read in BridgService still works for those.
+            }
             startForegroundService(Intent(this, BridgService::class.java).apply {
                 action = BridgService.ACTION_SEND_FILE
                 putExtra(BridgService.EXTRA_FILE_URI, uri.toString())
@@ -156,6 +187,16 @@ class MainActivity : AppCompatActivity() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
             != PackageManager.PERMISSION_GRANTED) {
             permissions.add(Manifest.permission.CAMERA)
+        }
+
+        // Only matters below API 29: from Q on, an app writing its own files to
+        // the public Downloads dir needs no permission at all (scoped storage),
+        // and the manifest already caps this permission at maxSdkVersion 29.
+        // Below that, receiving a file from the Mac needs it granted at runtime.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            != PackageManager.PERMISSION_GRANTED) {
+            permissions.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
