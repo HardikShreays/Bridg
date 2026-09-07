@@ -54,6 +54,9 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
     @Volatile private var pendingPairing: PairingManager.QRData? = null
     @Volatile private var connected = false
 
+    private var telephonyCallback: Any? = null
+    @Volatile private var callRinging = false
+
     /** Observed by MainActivity for the status line. */
     @Volatile var statusText: String = "Searching for Mac…"
         private set
@@ -144,6 +147,7 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
         startDiscovery()
         startClipboardMonitoring()
         startNotificationForwarding()
+        startCallStateMonitoring()
         Log.i(TAG, "Bridg service started")
     }
 
@@ -153,6 +157,7 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
 
         screenCapture.stopCapture()
         clipboardManager.stopMonitoring()
+        stopCallStateMonitoring()
         serviceDiscovery.stopDiscovery()
         bridgSocket.disconnect()
 
@@ -280,6 +285,96 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
                 }
             }
         )
+        // A call notification posts once. If it landed while the link was down,
+        // re-send whatever calls are still ringing now that we're back.
+        BridgNotificationListenerService.instance?.forwardActiveCalls()
+        if (callRinging) sendCallEvent(ringing = true)
+    }
+
+    private val CALL_EVENT_ID = "bridg:incoming-call"
+
+    /**
+     * Watch the phone's call state directly. The Samsung dialer's incoming-call
+     * notification is never delivered to NotificationListenerService, so that
+     * path alone misses every call — this is what actually makes calls show up
+     * on the Mac.
+     */
+    private fun startCallStateMonitoring() {
+        if (checkSelfPermission(android.Manifest.permission.READ_PHONE_STATE) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            Log.w(TAG, "READ_PHONE_STATE not granted — call detection disabled")
+            return
+        }
+        val tm = getSystemService(TELEPHONY_SERVICE) as android.telephony.TelephonyManager
+        val onState: (Int) -> Unit = { state ->
+            val ringing = state == android.telephony.TelephonyManager.CALL_STATE_RINGING
+            if (ringing != callRinging) {
+                callRinging = ringing
+                sendCallEvent(ringing)
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val cb = object : android.telephony.TelephonyCallback(),
+                android.telephony.TelephonyCallback.CallStateListener {
+                override fun onCallStateChanged(state: Int) = onState(state)
+            }
+            telephonyCallback = cb
+            tm.registerTelephonyCallback(mainExecutor, cb)
+        } else {
+            @Suppress("DEPRECATION")
+            val listener = object : android.telephony.PhoneStateListener() {
+                override fun onCallStateChanged(state: Int, phoneNumber: String?) = onState(state)
+            }
+            telephonyCallback = listener
+            @Suppress("DEPRECATION")
+            tm.listen(listener, android.telephony.PhoneStateListener.LISTEN_CALL_STATE)
+        }
+    }
+
+    private fun stopCallStateMonitoring() {
+        val cb = telephonyCallback ?: return
+        val tm = getSystemService(TELEPHONY_SERVICE) as android.telephony.TelephonyManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            tm.unregisterTelephonyCallback(cb as android.telephony.TelephonyCallback)
+        } else {
+            @Suppress("DEPRECATION")
+            tm.listen(cb as android.telephony.PhoneStateListener,
+                android.telephony.PhoneStateListener.LISTEN_NONE)
+        }
+        telephonyCallback = null
+    }
+
+    /** Tell the Mac a call started ringing (Answer/Decline) or stopped (clear it). */
+    private fun sendCallEvent(ringing: Boolean) {
+        // The dialer's own CATEGORY_CALL notification carries the caller name and
+        // is forwarded on its own — only fall back to this bare event when that
+        // notification isn't reaching the listener.
+        val haveCallNotification = BridgNotificationListenerService.instance
+            ?.activeNotifications?.any {
+                it.notification?.category == android.app.Notification.CATEGORY_CALL
+            } == true
+        if (ringing) {
+            if (haveCallNotification) return
+            bridgSocket.send(
+                Envelope.newBuilder().setNotification(
+                    NotificationEvent.newBuilder()
+                        .setId(CALL_EVENT_ID)
+                        .setPackageName("com.android.phone")
+                        .setAppLabel("Phone")
+                        .setTitle("Incoming call")
+                        .setText("Incoming call")
+                        .setTimestamp(System.currentTimeMillis())
+                        .setIsCall(true)
+                ).build()
+            )
+        } else {
+            bridgSocket.send(
+                Envelope.newBuilder().setNotifDismiss(
+                    NotificationDismiss.newBuilder().setId(CALL_EVENT_ID).setPackageName("com.android.phone")
+                ).build()
+            )
+        }
     }
 
     /**

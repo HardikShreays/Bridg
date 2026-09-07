@@ -18,10 +18,7 @@ class FileTransferManager {
     var onSendEnvelope: ((BridgProtoEnvelope) -> Void)?
 
     init() {
-        let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
-        downloadDirectory = downloads.appendingPathComponent("Bridg")
-
-        try? FileManager.default.createDirectory(at: downloadDirectory, withIntermediateDirectories: true)
+        downloadDirectory = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
     }
 
     // MARK: - Sending

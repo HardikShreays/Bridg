@@ -10,16 +10,25 @@ class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
 
     static let replyActionId = "BRIDG_REPLY"
     static let replyCategoryId = "BRIDG_REPLY_CATEGORY"
+    static let answerActionId = "BRIDG_CALL_ANSWER"
+    static let declineActionId = "BRIDG_CALL_DECLINE"
+    static let callCategoryId = "BRIDG_CALL_CATEGORY"
 
     /// (notificationId, actionId, replyText) — set by AppState so replies reach the phone.
     var onReply: ((String, String, String) -> Void)?
 
+    /// Answer / reject a ringing phone call from the Mac. Set by AppState.
+    var onCallAction: ((BridgProtoCallControl.Action) -> Void)?
+
     override init() {
         super.init()
         notificationCenter.delegate = self
-        requestAuthorization()
         registerReplyCategory()
         setupDatabase()
+        // Defer: called straight from AppState's @StateObject init, this runs
+        // before the app finishes launching and the framework just answers
+        // "Notifications are not allowed" without ever prompting.
+        DispatchQueue.main.async { [weak self] in self?.requestAuthorization() }
     }
 
     /// Registered once at startup. The old code rebuilt the whole category set
@@ -32,12 +41,28 @@ class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
             textInputButtonTitle: "Send",
             textInputPlaceholder: "Type a reply..."
         )
+        let answerAction = UNNotificationAction(
+            identifier: Self.answerActionId,
+            title: "Answer",
+            options: [.foreground]
+        )
+        let declineAction = UNNotificationAction(
+            identifier: Self.declineActionId,
+            title: "Decline",
+            options: [.destructive]
+        )
         notificationCenter.setNotificationCategories([
             UNNotificationCategory(
                 identifier: Self.replyCategoryId,
                 actions: [replyAction],
                 intentIdentifiers: [],
                 options: .customDismissAction
+            ),
+            UNNotificationCategory(
+                identifier: Self.callCategoryId,
+                actions: [answerAction, declineAction],
+                intentIdentifiers: [],
+                options: []
             )
         ])
     }
@@ -45,7 +70,7 @@ class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     // MARK: - Authorization
 
     private func requestAuthorization() {
-        notificationCenter.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+        notificationCenter.requestAuthorization(options: [.alert, .sound, .badge]) { _, error in
             if let error = error {
                 print("Notification authorization error: \(error)")
             }
@@ -62,8 +87,11 @@ class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         content.body = event.text
         content.sound = .default
 
-        // Add actions for reply support
-        if event.hasReplyAction_p {
+        // Ringing call → Answer/Decline; otherwise reply support if available.
+        if event.isCall {
+            content.categoryIdentifier = Self.callCategoryId
+            if #available(macOS 12.0, *) { content.interruptionLevel = .timeSensitive }
+        } else if event.hasReplyAction_p {
             content.categoryIdentifier = Self.replyCategoryId
         }
 
@@ -112,16 +140,31 @@ class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
 
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound, .list])
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let identifier = response.notification.request.identifier
 
-        if response.actionIdentifier == Self.replyActionId {
+        switch response.actionIdentifier {
+        case Self.replyActionId:
             if let textInput = response as? UNTextInputNotificationResponse {
-                let replyText = textInput.userText
-                sendReply(notificationId: identifier, replyText: replyText)
+                sendReply(notificationId: identifier, replyText: textInput.userText)
             }
+        case Self.answerActionId:
+            onCallAction?(.answer)
+        case Self.declineActionId:
+            onCallAction?(.reject)
+            dismissNotification(id: identifier)
+        default:
+            break
         }
 
         completionHandler()

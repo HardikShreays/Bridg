@@ -118,6 +118,7 @@ message NotificationEvent {
   bool has_reply_action = 8;    // Whether RemoteInput is present
   repeated NotificationAction actions = 9;
   bytes large_icon = 10;        // Optional large icon bitmap
+  bool is_call = 11;            // Notification.CATEGORY_CALL — show Answer/Decline on Mac
 }
 
 message NotificationAction {

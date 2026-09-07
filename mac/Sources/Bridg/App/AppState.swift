@@ -99,6 +99,16 @@ final class AppState: ObservableObject {
         send(event)
     }
 
+    /// Answer / hang up / mute / speaker on the phone's current call.
+    /// The incoming call itself surfaces as a normal forwarded notification.
+    func sendCallControl(_ action: BridgProtoCallControl.Action) {
+        var control = BridgProtoCallControl()
+        control.action = action
+        var envelope = BridgProtoEnvelope()
+        envelope.callControl = control
+        connectionManager.send(envelope)
+    }
+
     private func send(_ event: BridgProtoInputEvent) {
         var envelope = BridgProtoEnvelope()
         envelope.inputEvent = event
@@ -186,6 +196,10 @@ final class AppState: ObservableObject {
             envelope.notifAction = action
             self?.connectionManager.send(envelope)
             _ = notificationId
+        }
+
+        notificationManager.onCallAction = { [weak self] action in
+            self?.sendCallControl(action)
         }
     }
 

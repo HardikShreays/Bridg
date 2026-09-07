@@ -214,6 +214,14 @@ class MainActivity : AppCompatActivity() {
             permissions.add(Manifest.permission.ANSWER_PHONE_CALLS)
         }
 
+        // Detecting a ringing call directly — the Samsung dialer's own
+        // notification is never delivered to NotificationListenerService.
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            permissions.add(Manifest.permission.READ_PHONE_STATE)
+        }
+
         if (permissions.isNotEmpty()) {
             ActivityCompat.requestPermissions(this, permissions.toTypedArray(), REQUEST_PERMISSIONS)
         }

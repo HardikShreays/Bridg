@@ -43,7 +43,12 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-# Ad-hoc signature: unsigned bundles are denied Local Network access.
-codesign --force --deep --sign - "$APP" 2>/dev/null || echo "warning: codesign failed (app may not get network permission)"
+# Sign with a real identity if one exists — macOS denies notifications outright
+# to ad-hoc-signed apps ("Notifications are not allowed for this application").
+# Falls back to ad-hoc, which is enough for Local Network but not notifications.
+IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | grep -oE '"Apple Development: [^"]+"' | head -1 | tr -d '"')"
+codesign --force --deep --sign "${IDENTITY:--}" "$APP" 2>/dev/null \
+    || echo "warning: codesign failed (app may not get network/notification permission)"
+echo "signed with: ${IDENTITY:-ad-hoc}"
 
 echo "Built $(pwd)/$APP"

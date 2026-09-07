@@ -38,6 +38,9 @@ class BridgNotificationListenerService : NotificationListenerService() {
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
+        if (sbn.notification?.category == Notification.CATEGORY_CALL) {
+            Log.i(TAG, "call notification from ${sbn.packageName}, forwarder=${eventForwarder != null}")
+        }
         if (shouldIgnore(sbn)) return
 
         val key = "${sbn.packageName}:${sbn.id}"
@@ -112,12 +115,35 @@ class BridgNotificationListenerService : NotificationListenerService() {
         }
     }
 
+    /** Re-forward every still-active call notification — used right after a (re)connect. */
+    fun forwardActiveCalls() {
+        val forwarder = eventForwarder ?: return
+        activeNotifications?.filter {
+            it.notification?.category == Notification.CATEGORY_CALL
+        }?.forEach { sbn ->
+            buildNotificationEvent(sbn)?.let {
+                Log.i(TAG, "replaying active call ${it.id}")
+                forwarder.onNotificationPosted(it)
+            }
+        }
+    }
+
     private fun buildNotificationEvent(sbn: StatusBarNotification): NotificationEvent? {
         val notification = sbn.notification ?: return null
         val extras = notification.extras ?: return null
 
-        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
-        val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
+        val isCall = notification.category == Notification.CATEGORY_CALL
+        var title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
+        var text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
+
+        // CallStyle notifications carry the caller in EXTRA_TITLE_BIG / the person,
+        // and often leave EXTRA_TEXT empty. Give the Mac something to show.
+        if (isCall) {
+            if (title.isEmpty()) {
+                title = extras.getCharSequence(Notification.EXTRA_TITLE_BIG)?.toString() ?: "Incoming call"
+            }
+            if (text.isEmpty()) text = "Incoming call"
+        }
 
         val builder = NotificationEvent.newBuilder()
             .setId("${sbn.packageName}:${sbn.id}")
@@ -126,6 +152,7 @@ class BridgNotificationListenerService : NotificationListenerService() {
             .setTitle(title)
             .setText(text)
             .setTimestamp(sbn.postTime)
+            .setIsCall(isCall)
 
         // Check for reply actions
         val actions = notification.actions
@@ -153,6 +180,9 @@ class BridgNotificationListenerService : NotificationListenerService() {
     private fun shouldIgnore(sbn: StatusBarNotification): Boolean {
         // Ignore our own notifications
         if (sbn.packageName == packageName) return true
+
+        // Call notifications are ongoing while ringing/active — never filter them.
+        if (sbn.notification?.category == Notification.CATEGORY_CALL) return false
 
         // Ignore ongoing media notifications
         if (sbn.isOngoing) return true
