@@ -36,8 +36,13 @@ bridg/
 **Android:**
 ```bash
 cd android
-./gradlew assembleDebug
+./gradlew assembleDebug                 # build the APK
+./gradlew installDebug                   # build + install on a connected device (adb)
 ```
+
+The APK lands at `android/app/build/outputs/apk/debug/app-debug.apk` — install
+it directly with `adb install -r app/build/outputs/apk/debug/app-debug.apk`, or
+send that file to the phone and open it (enable "Install unknown apps").
 
 **Mac:**
 ```bash
