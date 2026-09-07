@@ -68,6 +68,19 @@ class BridgAccessibilityService : AccessibilityService() {
         }
     }
 
+    /**
+     * Press the headset-hook key: answers a ringing call, or hangs up an
+     * active one — the fallback used when Bridg lacks the ANSWER_PHONE_CALLS
+     * runtime permission. Requires API 30+.
+     */
+    fun pressHeadsetHook() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            performGlobalAction(GLOBAL_ACTION_KEYCODE_HEADSETHOOK)
+        } else {
+            Log.w(TAG, "Headset-hook global action needs API 30+")
+        }
+    }
+
     private fun dispatchTap(normalizedX: Float, normalizedY: Float) {
         val (x, y) = screenCoords(normalizedX, normalizedY)
         val path = android.graphics.Path().apply { moveTo(x, y) }

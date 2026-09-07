@@ -29,6 +29,8 @@ message Envelope {
 
     InputEvent input_event = 50;
 
+    CallControl call_control = 52;
+
     VideoFrame video_frame = 60;
     VideoStreamStart video_stream_start = 61;
     VideoStreamStop video_stream_stop = 62;
@@ -172,6 +174,25 @@ message InputEvent {
 
   // Timestamp for ordering
   uint64 timestamp = 11;
+}
+
+// ─── Call Control ────────────────────────────────────────────────────────────
+
+// Mac → phone. Control an ongoing or ringing phone call. The incoming-call
+// notification already reaches the Mac through NotificationEvent; this is the
+// reply channel for acting on it.
+message CallControl {
+  enum Action {
+    ACTION_UNSPECIFIED = 0;
+    ANSWER = 1;          // Accept a ringing call
+    REJECT = 2;          // Reject a ringing call (same as END on Android)
+    END = 3;             // Hang up the active call
+    MUTE = 4;            // Mute the microphone
+    UNMUTE = 5;
+    SPEAKER_ON = 6;
+    SPEAKER_OFF = 7;
+  }
+  Action action = 1;
 }
 
 // ─── Video ───────────────────────────────────────────────────────────────────

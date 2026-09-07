@@ -419,6 +419,44 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
         fileTransferManager.startSend(stream, file.name, file.length(), "application/octet-stream")
     }
 
+    /**
+     * Act on a call-control command from the Mac.
+     *
+     * Answer/end go through TelecomManager when ANSWER_PHONE_CALLS is granted;
+     * otherwise we fall back to the accessibility service's headset-hook key,
+     * which toggles answer/hang-up the same way a wired headset button does.
+     * Mute and speaker are plain AudioManager calls (MODIFY_AUDIO_SETTINGS).
+     */
+    private fun handleCallControl(action: CallControl.Action) {
+        val audio = getSystemService(AUDIO_SERVICE) as android.media.AudioManager
+        when (action) {
+            CallControl.Action.ANSWER, CallControl.Action.END, CallControl.Action.REJECT -> {
+                val telecom = getSystemService(TELECOM_SERVICE) as android.telecom.TelecomManager
+                val granted = checkSelfPermission(android.Manifest.permission.ANSWER_PHONE_CALLS) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+                try {
+                    if (granted && action == CallControl.Action.ANSWER &&
+                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                    ) {
+                        telecom.acceptRingingCall()
+                    } else if (granted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        @Suppress("MissingPermission") telecom.endCall()
+                    } else {
+                        com.bridg.input.BridgAccessibilityService.instance?.pressHeadsetHook()
+                    }
+                } catch (e: SecurityException) {
+                    Log.w(TAG, "Call control denied, trying accessibility: ${e.message}")
+                    com.bridg.input.BridgAccessibilityService.instance?.pressHeadsetHook()
+                }
+            }
+            CallControl.Action.MUTE -> audio.isMicrophoneMute = true
+            CallControl.Action.UNMUTE -> audio.isMicrophoneMute = false
+            CallControl.Action.SPEAKER_ON -> audio.isSpeakerphoneOn = true
+            CallControl.Action.SPEAKER_OFF -> audio.isSpeakerphoneOn = false
+            else -> Log.w(TAG, "Unhandled call action: $action")
+        }
+    }
+
     private fun handleIncomingEnvelope(envelope: Envelope) {
         when (envelope.payloadCase) {
             Envelope.PayloadCase.PAIR_RESPONSE -> {
@@ -482,6 +520,8 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
             Envelope.PayloadCase.INPUT_EVENT -> {
                 com.bridg.input.BridgAccessibilityService.instance?.dispatchInputEvent(envelope.inputEvent)
             }
+
+            Envelope.PayloadCase.CALL_CONTROL -> handleCallControl(envelope.callControl.action)
 
             Envelope.PayloadCase.PING -> {
                 bridgSocket.send(

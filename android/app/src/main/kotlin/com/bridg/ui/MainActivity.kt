@@ -206,6 +206,14 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Needed to answer/end calls from the Mac via TelecomManager; without it
+        // BridgService falls back to the accessibility headset-hook key.
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ANSWER_PHONE_CALLS)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            permissions.add(Manifest.permission.ANSWER_PHONE_CALLS)
+        }
+
         if (permissions.isNotEmpty()) {
             ActivityCompat.requestPermissions(this, permissions.toTypedArray(), REQUEST_PERMISSIONS)
         }
@@ -218,7 +226,21 @@ class MainActivity : AppCompatActivity() {
                 getString(R.string.notification_listener_description),
                 Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
             )
+        } else if (!isAccessibilityEnabled()) {
+            // Without this, InputEvents from the Mac reach BridgService and are
+            // dropped — mirroring shows the screen but no tap does anything.
+            showPermissionDialog(
+                "Accessibility Access",
+                getString(R.string.accessibility_service_description),
+                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+            )
         }
+    }
+
+    private fun isAccessibilityEnabled(): Boolean {
+        val componentName = ComponentName(this, "com.bridg.input.BridgAccessibilityService")
+        val enabled = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+        return enabled?.contains(componentName.flattenToString()) == true
     }
 
     private fun isNotificationListenerEnabled(): Boolean {
