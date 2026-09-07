@@ -113,6 +113,18 @@ class FileTransferManager {
             return ack
         }
 
+        // The phone streams strictly in order. A chunk that doesn't start
+        // where the last one ended means one was dropped on the wire — fail
+        // loudly instead of seeking past the gap and writing a corrupt file
+        // that reports success.
+        guard Int64(chunk.offset) == state.bytesTransferred else {
+            activeTransfers.removeValue(forKey: chunk.transferID)
+            try? FileManager.default.removeItem(at: state.url)
+            ack.error = "Out-of-order chunk (expected \(state.bytesTransferred), got \(chunk.offset))"
+            onTransferError?(chunk.transferID, ack.error)
+            return ack
+        }
+
         do {
             let fileHandle = try FileHandle(forWritingTo: state.url)
             fileHandle.seek(toFileOffset: UInt64(chunk.offset))
@@ -120,6 +132,7 @@ class FileTransferManager {
             fileHandle.closeFile()
 
             let bytesReceived = Int64(chunk.offset) + Int64(chunk.data.count)
+            activeTransfers[chunk.transferID]?.bytesTransferred = bytesReceived
             ack.bytesReceived = UInt64(bytesReceived)
 
             if bytesReceived >= state.totalSize {

@@ -27,7 +27,8 @@ bridg/
 
 ### Prerequisites
 
-- Android Studio (latest stable)
+- Android Studio (latest stable), building with **JDK 17 or 21** (JDK 24+ is not
+  supported by this project's Gradle/AGP — see [RUNNING.md](RUNNING.md))
 - Xcode 15+ with macOS 13+ deployment target
 - protobuf compiler (`protoc`) or buf CLI
 

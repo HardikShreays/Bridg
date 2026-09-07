@@ -58,8 +58,28 @@ struct MirrorView: View {
                     )
             }
             .aspectRatio(appState.mirrorAspectRatio, contentMode: .fit)
+
+            // Hardware-nav buttons: gesture-nav swipes don't come through a
+            // mirrored surface, and the phone's bottom pill is easy to miss.
+            HStack(spacing: 24) {
+                navButton("chevron.left", "Back", .back)
+                navButton("circle", "Home", .home)
+                navButton("square.on.square", "Recents", .recents)
+            }
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity)
+            .background(Color(nsColor: .controlBackgroundColor))
         }
         .frame(minWidth: 300, minHeight: 500)
+    }
+
+    private func navButton(_ icon: String, _ label: String, _ key: BridgProtoInputEvent.EventType) -> some View {
+        Button(action: { appState.sendKey(key) }) {
+            Image(systemName: icon).font(.system(size: 16))
+        }
+        .buttonStyle(.plain)
+        .help(label)
+        .disabled(!appState.connectionState.isConnected)
     }
 
     private var statusText: String {
@@ -114,6 +134,11 @@ final class MirrorNSView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is unused") }
+
+    // Let clicks fall through to SwiftUI. A plain NSView still claims every
+    // mouse event that lands on it, which swallowed the DragGesture wrapped
+    // around this view — so taps and swipes on the mirror did nothing.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     deinit { sinks.detach(self) }
 

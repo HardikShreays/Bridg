@@ -78,6 +78,18 @@ class BridgSocket {
     }
 
     /**
+     * Blocking enqueue for bulk producers (file chunks). A big file generates
+     * chunks far faster than the socket drains them; [send]'s `trySend` then
+     * silently dropped chunks once the 256-deep queue filled, so the receiver
+     * saw gaps and the transfer either stalled or finished corrupt. This
+     * back-pressures the producer instead. Safe only off the receive thread —
+     * the file sender runs on its own dedicated thread.
+     */
+    fun sendBlocking(envelope: Envelope) {
+        runBlocking { sendQueue.send(Outgoing(envelope)) }
+    }
+
+    /**
      * Send this frame in the clear, then switch the link to encrypted.
      *
      * The switch has to happen on the send loop itself: the Mac turns on

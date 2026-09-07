@@ -1,8 +1,32 @@
 package com.bridg
 
+import com.bridg.notify.BridgNotificationListenerService
+import com.bridg.notify.BridgNotificationListenerService.Seen
 import com.bridg.pairing.SessionKdf
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
+
+class NotificationDedupTest {
+    private fun forward(prev: Seen?, now: Long, sig: Int) =
+        BridgNotificationListenerService.shouldForward(prev, now, sig)
+
+    @Test fun firstPostAlwaysForwards() =
+        assertTrue(forward(null, 1_000, 42))
+
+    @Test fun rapidUpdateIsDropped() =
+        assertFalse(forward(Seen(at = 1_000, sig = 1), now = 1_300, sig = 2))
+
+    @Test fun identicalRepostWithinAMinuteIsDropped() =
+        assertFalse(forward(Seen(at = 1_000, sig = 7), now = 31_000, sig = 7))
+
+    @Test fun changedContentAfterDebounceForwards() =
+        assertTrue(forward(Seen(at = 1_000, sig = 7), now = 31_000, sig = 8))
+
+    @Test fun sameContentAfterAMinuteForwardsAgain() =
+        assertTrue(forward(Seen(at = 1_000, sig = 7), now = 90_000, sig = 7))
+}
 
 class SessionKdfTest {
 

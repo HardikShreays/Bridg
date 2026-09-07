@@ -77,8 +77,10 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
         bridgSocket.setConnectionListener(this)
         bridgSocket.setReceiveListener { envelope -> handleIncomingEnvelope(envelope) }
 
-        // Without this the manager built chunks and discarded them.
-        fileTransferManager.setEnvelopeSender { envelope -> bridgSocket.send(envelope) }
+        // Without this the manager built chunks and discarded them. Use the
+        // blocking path so a fast disk read can't outrun the socket and get
+        // chunks dropped — that was the "file transfer works sometimes" bug.
+        fileTransferManager.setEnvelopeSender { envelope -> bridgSocket.sendBlocking(envelope) }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

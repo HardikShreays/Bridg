@@ -88,6 +88,16 @@ final class AppState: ObservableObject {
         send(event)
     }
 
+    /// Back / Home / Recents — the phone's accessibility service maps these to
+    /// the matching global actions. Needed because swipe-up gesture nav can't
+    /// be driven reliably from a mirrored surface.
+    func sendKey(_ type: BridgProtoInputEvent.EventType) {
+        var event = BridgProtoInputEvent()
+        event.type = type
+        event.timestamp = UInt64(Date().timeIntervalSince1970 * 1_000_000)
+        send(event)
+    }
+
     func sendSwipe(from start: CGPoint, to end: CGPoint) {
         var event = BridgProtoInputEvent()
         event.type = .swipe

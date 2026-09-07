@@ -132,9 +132,34 @@ class BridgAccessibilityService : AccessibilityService() {
         }
     }
 
+    /**
+     * Map a 0..1 coordinate from the Mac onto real screen pixels.
+     *
+     * `resources.displayMetrics` reports the app-usable area, which on most
+     * OEM builds excludes the navigation bar / gesture pill — so y=1.0 landed
+     * above the bottom of the screen and the lowest row (nav pill, keyboard
+     * bottom row, pull-up handles) was unreachable from the mirror. The real
+     * display bounds include the system bars.
+     */
     private fun screenCoords(normalizedX: Float, normalizedY: Float): Pair<Float, Float> {
-        val dm = resources.displayMetrics
-        return Pair(normalizedX * dm.widthPixels, normalizedY * dm.heightPixels)
+        val (w, h) = realDisplaySize()
+        // A point exactly on the far edge (normalized 1.0) is off-screen and
+        // dispatchGesture() rejects the whole stroke — keep it just inside.
+        val x = (normalizedX * w).coerceIn(0f, w - 1f)
+        val y = (normalizedY * h).coerceIn(0f, h - 1f)
+        return Pair(x, y)
+    }
+
+    private fun realDisplaySize(): Pair<Int, Int> {
+        val wm = getSystemService(WINDOW_SERVICE) as android.view.WindowManager
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val b = wm.currentWindowMetrics.bounds
+            Pair(b.width(), b.height())
+        } else {
+            val p = android.graphics.Point()
+            @Suppress("DEPRECATION") wm.defaultDisplay.getRealSize(p)
+            Pair(p.x, p.y)
+        }
     }
 
     companion object {

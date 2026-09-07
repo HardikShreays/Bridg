@@ -161,6 +161,8 @@ class FileTransferManager(private val context: Context) {
                 .build()
         } catch (e: Exception) {
             Log.e(TAG, "Error writing chunk: ${e.message}")
+            activeTransfers.remove(chunk.transferId)
+            discardPending(sanitize(state.filename))
             return FileTransferAck.newBuilder()
                 .setTransferId(chunk.transferId)
                 .setError(e.message ?: "Write error")
@@ -174,6 +176,7 @@ class FileTransferManager(private val context: Context) {
     fun handleTransferCancel(cancel: FileTransferCancel) {
         val state = activeTransfers.remove(cancel.transferId)
         state?.outputStream?.close()
+        state?.let { discardPending(sanitize(it.filename)) }
         transferListener?.onTransferCancelled(cancel.transferId, cancel.reason)
         Log.i(TAG, "Transfer cancelled: ${cancel.transferId} — ${cancel.reason}")
     }
@@ -250,6 +253,21 @@ class FileTransferManager(private val context: Context) {
             null,
             null
         )
+    }
+
+    /**
+     * Drop a half-written MediaStore row for a transfer that failed or was
+     * cancelled. Without this the row lingers with IS_PENDING=1 forever —
+     * invisible to every app but still taking space.
+     */
+    private fun discardPending(filename: String) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        val uri = pendingUris.remove(filename) ?: return
+        try {
+            context.contentResolver.delete(uri, null, null)
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not delete pending $filename: ${e.message}")
+        }
     }
 
     /** A peer-supplied name must never escape the download directory. */

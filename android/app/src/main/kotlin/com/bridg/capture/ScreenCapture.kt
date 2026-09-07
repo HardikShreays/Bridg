@@ -105,9 +105,18 @@ class ScreenCapture(private val context: Context) {
      * this crashed on the first tap of "Start Capture" on most phones.
      */
     private fun resolveCaptureSize() {
-        val metrics = context.resources.displayMetrics
-        val w = metrics.widthPixels
-        val h = metrics.heightPixels
+        // Real display bounds, not resources.displayMetrics — the latter drops
+        // the navigation-bar strip on most OEM builds, which skewed the mirror's
+        // aspect ratio and left the phone's bottom row unreachable from the Mac.
+        val wm = context.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
+        val (w, h) = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            val b = wm.currentWindowMetrics.bounds
+            Pair(b.width(), b.height())
+        } else {
+            val p = android.graphics.Point()
+            @Suppress("DEPRECATION") wm.defaultDisplay.getRealSize(p)
+            Pair(p.x, p.y)
+        }
         val shortEdge = minOf(w, h)
         val scale = if (shortEdge > MAX_SHORT_EDGE) MAX_SHORT_EDGE.toFloat() / shortEdge else 1f
         width = alignTo16((w * scale).toInt())

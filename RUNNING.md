@@ -22,6 +22,18 @@ adb version
 
 If `adb` is missing, install Android Studio once and it comes with it.
 
+**Use JDK 17 or 21.** This project's Gradle (8.7) and Android Gradle Plugin
+(8.5) do not run on JDK 24/25 — the build fails with no useful error. If
+`java -version` shows 24+, install JDK 17 (`brew install openjdk@17`) and point
+the build at it:
+
+```bash
+./gradlew installDebug -Dorg.gradle.java.home="$(/usr/libexec/java_home -v 17)"
+```
+
+or set `JAVA_HOME` for the whole shell. Android Studio's bundled JDK (17/21)
+already works — building from there needs no flag.
+
 ## 1. Build and start the Mac app
 
 ```bash
