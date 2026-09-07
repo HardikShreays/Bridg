@@ -12,7 +12,6 @@ Built on proven capture approaches (inspired by scrcpy) with a custom protobuf-b
 - **Clipboard Sync**: Copy on one device, paste on the other
 - **Screen Mirroring**: Live phone screen on your Mac with low latency
 - **Input Control**: Click, type, and gesture on your phone from Mac
-- **Camera as Webcam**: Use your phone camera as a virtual webcam in Zoom/Meet
 
 ## Architecture
 
@@ -61,7 +60,7 @@ See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the wire protocol specification.
 
 1. **Phase 1** — Pairing, Transport, File Transfer
 2. **Phase 2** — Notifications, Clipboard Sync
-3. **Phase 3** — Screen Mirroring + Input Control + Camera Extension
+3. **Phase 3** — Screen Mirroring + Input Control
 4. **Phase 4** — Polish and parity features
 
 ## Security
