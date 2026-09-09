@@ -26,6 +26,8 @@ mac/Packages/
 proto/gen/
 **/*.pb.swift
 **/*.pb.swift.h
+# ...except the mac app's, which is committed (CI has no protoc step to regenerate it)
+!mac/Sources/Bridg/Generated/bridg.pb.swift
 
 # OS
 .DS_Store
