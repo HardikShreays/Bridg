@@ -40,7 +40,9 @@ jobs:
           path: android/app/build/outputs/apk/release/app-release.apk
 
   mac:
-    runs-on: macos-14
+    # macos-15 ships Xcode 16.4 / Swift 6.1+, which the swift-protobuf 1.38
+    # generated code needs (`nonisolated` on type declarations).
+    runs-on: macos-15
     env:
       CERT_BASE64: ${{ secrets.MAC_CERT_BASE64 }}
     steps:
