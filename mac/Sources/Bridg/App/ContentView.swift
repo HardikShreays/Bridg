@@ -132,7 +132,9 @@ struct HomeDetailView: View {
                 }
             } else if let qr = appState.pairingQRCode {
                 Image(nsImage: qr)
+                    .resizable()
                     .interpolation(.none)
+                    .aspectRatio(1, contentMode: .fit)
                     .frame(width: 300, height: 300)
                 Text("Open Bridg on your phone and tap \"Pair New Device\"")
                     .font(.callout)
@@ -385,7 +387,9 @@ struct ConnectionView: View {
                         Spacer()
                         VStack(spacing: 8) {
                             Image(nsImage: qr)
+                                .resizable()
                                 .interpolation(.none)
+                                .aspectRatio(1, contentMode: .fit)
                                 .frame(width: 200, height: 200)
                             Text("Open Bridg on your phone and tap \"Pair New Device\"")
                                 .font(.caption)
