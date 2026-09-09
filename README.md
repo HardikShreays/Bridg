@@ -76,6 +76,10 @@ See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the wire protocol specification.
 - Device identity stored in Android EncryptedSharedPreferences / macOS Keychain
 - No data leaves your local network
 
+## Support
+
+If you find Bridg useful, you can [buy me a coffee](https://buymeacoffee.com/hardikshreyas).
+
 ## License
 
 MIT — see [LICENSE](LICENSE) for details.
