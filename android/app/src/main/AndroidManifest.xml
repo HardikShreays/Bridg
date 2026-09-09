@@ -74,6 +74,16 @@
             android:name=".ui.PairingActivity"
             android:exported="false" />
 
+        <!-- Transparent helper: briefly holds focus so the service can read the
+             clipboard (Android 10+ blocks background reads). No UI. -->
+        <activity
+            android:name=".ui.ClipboardBridgeActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <!-- Main foreground service for transport, clipboard, notifications -->
         <service
             android:name=".service.BridgService"

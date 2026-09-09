@@ -31,33 +31,12 @@ struct MirrorView: View {
             .padding(.vertical, 8)
             .background(Color(nsColor: .controlBackgroundColor))
 
-            // Mirror display
-            GeometryReader { geometry in
-                MirrorDisplayView(sinks: appState.videoSinks)
-                    .background(Color.black)
-                    .contentShape(Rectangle())
-                    // Taps are normalized against the *view's* size. The old code
-                    // divided by the drag delta, which is the distance moved, not
-                    // the surface — a tap (delta 0) was discarded outright and a
-                    // drag produced a coordinate with no relation to the screen.
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onEnded { value in
-                                guard geometry.size.width > 0, geometry.size.height > 0 else { return }
-                                let dx = value.location.x - value.startLocation.x
-                                let dy = value.location.y - value.startLocation.y
-                                let start = normalized(value.startLocation, in: geometry.size)
-                                let end = normalized(value.location, in: geometry.size)
-
-                                if abs(dx) < 10 && abs(dy) < 10 {
-                                    appState.sendTap(x: start.x, y: start.y)
-                                } else {
-                                    appState.sendSwipe(from: start, to: end)
-                                }
-                            }
-                    )
-            }
-            .aspectRatio(appState.mirrorAspectRatio, contentMode: .fit)
+            // Mirror display. All pointer/keyboard input is handled inside
+            // MirrorNSView: AppKit gives us trackpad scroll, pinch and key
+            // events, which SwiftUI gestures on macOS do not.
+            MirrorDisplayView(sinks: appState.videoSinks, appState: appState)
+                .background(Color.black)
+                .aspectRatio(appState.mirrorAspectRatio, contentMode: .fit)
 
             // Hardware-nav buttons: gesture-nav swipes don't come through a
             // mirrored surface, and the phone's bottom pill is easy to miss.
@@ -87,13 +66,6 @@ struct MirrorView: View {
         return appState.isScreenMirroring ? "Mirroring" : "Start mirroring from the phone"
     }
 
-    private func normalized(_ point: CGPoint, in size: CGSize) -> CGPoint {
-        CGPoint(
-            x: min(max(point.x / size.width, 0), 1),
-            y: min(max(point.y / size.height, 0), 1)
-        )
-    }
-
     private func toggleFullscreen() {
         NSApp.keyWindow?.toggleFullScreen(nil)
     }
@@ -102,9 +74,10 @@ struct MirrorView: View {
 /// NSViewRepresentable that wraps AVSampleBufferDisplayLayer for video rendering.
 struct MirrorDisplayView: NSViewRepresentable {
     let sinks: VideoSinks
+    let appState: AppState
 
     func makeNSView(context: Context) -> MirrorNSView {
-        MirrorNSView(sinks: sinks)
+        MirrorNSView(sinks: sinks, appState: appState)
     }
 
     func updateNSView(_ nsView: MirrorNSView, context: Context) {}
@@ -117,9 +90,22 @@ struct MirrorDisplayView: NSViewRepresentable {
 final class MirrorNSView: NSView {
     private let displayLayer = AVSampleBufferDisplayLayer()
     private let sinks: VideoSinks
+    private let appState: AppState
 
-    init(sinks: VideoSinks) {
+    /// Mouse-down anchor, used to tell a tap from a long press from a drag.
+    private var pressOrigin: CGPoint?
+    private var pressStart: Date?
+
+    /// Trackpad gestures arrive as a stream of small deltas; they are summed
+    /// and flushed as one phone gesture so we don't spam the wire (and the
+    /// phone's gesture dispatcher) with a stroke per wheel tick.
+    private var scrollDelta: CGSize = .zero
+    private var pinchMagnification: CGFloat = 0
+    private var flushTimer: Timer?
+
+    init(sinks: VideoSinks, appState: AppState) {
         self.sinks = sinks
+        self.appState = appState
         super.init(frame: .zero)
 
         wantsLayer = true
@@ -135,14 +121,121 @@ final class MirrorNSView: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is unused") }
 
-    // Let clicks fall through to SwiftUI. A plain NSView still claims every
-    // mouse event that lands on it, which swallowed the DragGesture wrapped
-    // around this view — so taps and swipes on the mirror did nothing.
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    // Top-left origin, so view coordinates match the phone's.
+    override var isFlipped: Bool { true }
+
+    override var acceptsFirstResponder: Bool { true }
+
+    // MARK: - Pointer
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        pressOrigin = convert(event.locationInWindow, from: nil)
+        pressStart = Date()
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let origin = pressOrigin, let started = pressStart else { return }
+        pressOrigin = nil
+        pressStart = nil
+
+        let end = convert(event.locationInWindow, from: nil)
+        let elapsed = Date().timeIntervalSince(started)
+        let moved = hypot(end.x - origin.x, end.y - origin.y)
+
+        if moved < Self.dragThreshold {
+            if elapsed > Self.longPressSeconds {
+                appState.sendLongPress(x: normalized(origin).x, y: normalized(origin).y)
+            } else {
+                appState.sendTap(x: normalized(origin).x, y: normalized(origin).y)
+            }
+        } else {
+            // Match the real drag duration so a flick stays a flick.
+            appState.sendSwipe(
+                from: normalized(origin),
+                to: normalized(end),
+                durationMs: Int32(max(50, min(elapsed * 1000, 2000)))
+            )
+        }
+    }
+
+    /// Two-finger scroll → a swipe in the same direction the fingers moved.
+    override func scrollWheel(with event: NSEvent) {
+        scrollDelta.width += event.scrollingDeltaX
+        scrollDelta.height += event.scrollingDeltaY
+        scheduleFlush()
+    }
+
+    /// Trackpad pinch → a two-finger pinch on the phone.
+    override func magnify(with event: NSEvent) {
+        pinchMagnification += event.magnification
+        scheduleFlush()
+    }
+
+    private func scheduleFlush() {
+        guard flushTimer == nil else { return }
+        flushTimer = Timer.scheduledTimer(withTimeInterval: Self.flushInterval, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.flushTrackpad() }
+        }
+    }
+
+    private func flushTrackpad() {
+        flushTimer = nil
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+
+        if abs(scrollDelta.height) > 1 || abs(scrollDelta.width) > 1 {
+            let end = CGPoint(x: center.x + scrollDelta.width, y: center.y + scrollDelta.height)
+            appState.sendSwipe(
+                from: normalized(center),
+                to: normalized(end),
+                durationMs: Self.scrollDurationMs
+            )
+            scrollDelta = .zero
+        }
+
+        if abs(pinchMagnification) > 0.01 {
+            let endSpan = (Self.pinchBaseSpan * (1 + pinchMagnification)).clamped(to: 0.05...0.9)
+            appState.sendPinch(
+                center: normalized(center),
+                startSpan: Self.pinchBaseSpan,
+                endSpan: endSpan
+            )
+            pinchMagnification = 0
+        }
+    }
+
+    // MARK: - Keyboard
+
+    override func keyDown(with event: NSEvent) {
+        // Cmd-shortcuts belong to the Mac app, not the phone.
+        guard !event.modifierFlags.contains(.command) else {
+            super.keyDown(with: event)
+            return
+        }
+        switch event.keyCode {
+        case 36, 76: appState.sendKeycode(66)                   // Return / Enter → KEYCODE_ENTER
+        case 51, 117: appState.sendKeycode(67)                  // Delete → KEYCODE_DEL
+        case 53: appState.sendKey(.back)                        // Esc → Back
+        default:
+            guard let text = event.characters, !text.isEmpty else { return }
+            appState.sendText(text)
+        }
+    }
+
+    private func normalized(_ point: CGPoint) -> CGPoint {
+        guard bounds.width > 0, bounds.height > 0 else { return .zero }
+        return CGPoint(
+            x: min(max(point.x / bounds.width, 0), 1),
+            y: min(max(point.y / bounds.height, 0), 1)
+        )
+    }
 
     deinit { sinks.detach(self) }
 
-    func detach() { sinks.detach(self) }
+    func detach() {
+        flushTimer?.invalidate()
+        sinks.detach(self)
+    }
 
     override func layout() {
         super.layout()
@@ -161,4 +254,19 @@ final class MirrorNSView: NSView {
         }
         displayLayer.enqueue(sampleBuffer)
     }
+}
+
+private extension Comparable {
+    func clamped(to range: ClosedRange<Self>) -> Self {
+        min(max(self, range.lowerBound), range.upperBound)
+    }
+}
+
+private extension MirrorNSView {
+    static let dragThreshold: CGFloat = 10
+    static let longPressSeconds: TimeInterval = 0.5
+    static let flushInterval: TimeInterval = 0.05
+    static let scrollDurationMs: Int32 = 60
+    /// Fingers start this far apart (fraction of screen width) for a pinch.
+    static let pinchBaseSpan: CGFloat = 0.3
 }

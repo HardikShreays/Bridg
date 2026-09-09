@@ -13,6 +13,12 @@ final class ConnectionManager {
     private let keychainManager = KeychainManager()
     private let pairingManager = PairingManager()
 
+    /// Everything network-facing runs here. It used to run on `.main`, which
+    /// put per-frame decrypt, protobuf parsing and H.264 sample assembly on the
+    /// same thread as SwiftUI — the mirror stuttered because the UI and the
+    /// decoder were fighting over one thread.
+    private let netQueue = DispatchQueue(label: "com.bridg.net")
+
     private var listener: NWListener?
     private var connection: NWConnection?
     private let frameBuffer = FrameBuffer()
@@ -24,41 +30,52 @@ final class ConnectionManager {
     /// Token from the QR code currently on screen. Non-nil only while pairing.
     private var activePairingToken: String?
 
-    // Callbacks (delivered on the main queue).
+    // Callbacks (delivered on [netQueue]; AppState hops to the main actor).
     var onConnected: ((String) -> Void)?
     var onDisconnected: (() -> Void)?
     var onPaired: ((String) -> Void)?
     var onMessage: ((BridgProtoEnvelope) -> Void)?
+
+    /// Video traffic, delivered synchronously on [netQueue] so decoding never
+    /// touches the main thread. Everything else goes through [onMessage].
+    var onVideoMessage: ((BridgProtoEnvelope) -> Void)?
 
     var isConnected: Bool { connection?.state == .ready }
 
     // MARK: - Lifecycle
 
     func start() {
-        guard !isRunning else { return }
-        isRunning = true
-        startListening()
+        netQueue.async {
+            guard !self.isRunning else { return }
+            self.isRunning = true
+            self.startListening()
+        }
     }
 
     func stop() {
-        isRunning = false
-        pingTimer?.invalidate()
-        pingTimer = nil
-        listener?.cancel()
-        connection?.cancel()
-        listener = nil
-        connection = nil
-        encryptedTransport = nil
+        netQueue.async {
+            self.isRunning = false
+            self.stopPinging()
+            self.listener?.cancel()
+            self.connection?.cancel()
+            self.listener = nil
+            self.connection = nil
+            self.encryptedTransport = nil
+        }
     }
 
     /// Arm pairing: the phone's next PairRequest must carry this token.
     func beginPairing(token: String) {
-        activePairingToken = token
+        netQueue.async { self.activePairingToken = token }
     }
 
     // MARK: - Sending
 
     func send(_ envelope: BridgProtoEnvelope) {
+        netQueue.async { self.sendOnQueue(envelope) }
+    }
+
+    private func sendOnQueue(_ envelope: BridgProtoEnvelope) {
         guard let connection, connection.state == .ready else {
             print("Not connected — dropping \(envelope.payload.map(String.init(describing:)) ?? "message")")
             return
@@ -112,7 +129,7 @@ final class ConnectionManager {
                 }
             }
 
-            listener.start(queue: .main)
+            listener.start(queue: netQueue)
             self.listener = listener
         } catch {
             print("Failed to create listener: \(error)")
@@ -143,30 +160,40 @@ final class ConnectionManager {
             }
         }
 
-        new.start(queue: .main)
+        new.start(queue: netQueue)
         receive(on: new)
     }
 
     private func teardown(_ dead: NWConnection) {
         // Ignore the death rattle of a connection we already replaced.
         guard dead === connection else { return }
-        pingTimer?.invalidate()
-        pingTimer = nil
+        stopPinging()
         connection = nil
         encryptedTransport = nil
         frameBuffer.reset()
         onDisconnected?()
     }
 
+    /// The keepalive Timer needs a run loop, and [netQueue] has none — schedule
+    /// and invalidate it on main. `send` hops back to the queue on its own.
     private func startPinging() {
-        pingTimer?.invalidate()
-        pingTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
-            guard let self, self.isConnected else { return }
-            var ping = BridgProtoPing()
-            ping.timestamp = UInt64(Date().timeIntervalSince1970 * 1000)
-            var envelope = BridgProtoEnvelope()
-            envelope.ping = ping
-            self.send(envelope)
+        DispatchQueue.main.async {
+            self.pingTimer?.invalidate()
+            self.pingTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+                guard let self, self.isConnected else { return }
+                var ping = BridgProtoPing()
+                ping.timestamp = UInt64(Date().timeIntervalSince1970 * 1000)
+                var envelope = BridgProtoEnvelope()
+                envelope.ping = ping
+                self.send(envelope)
+            }
+        }
+    }
+
+    private func stopPinging() {
+        DispatchQueue.main.async {
+            self.pingTimer?.invalidate()
+            self.pingTimer = nil
         }
     }
 
@@ -222,7 +249,14 @@ final class ConnectionManager {
                 continue
             }
 
-            if !handleTransportMessage(envelope) {
+            if handleTransportMessage(envelope) { continue }
+
+            // Decode on this queue rather than shipping the frame to the main
+            // actor first — that hop is what the mirror's latency was made of.
+            switch envelope.payload {
+            case .videoFrame, .videoStreamStart, .videoStreamStop:
+                onVideoMessage?(envelope)
+            default:
                 onMessage?(envelope)
             }
         }
@@ -247,7 +281,7 @@ final class ConnectionManager {
             pong.pingTimestamp = ping.timestamp
             var reply = BridgProtoEnvelope()
             reply.pong = pong
-            send(reply)
+            sendOnQueue(reply)
             return true
 
         case .pong:
@@ -279,7 +313,7 @@ final class ConnectionManager {
         // The response itself is the last plaintext frame; encryption starts after.
         var envelope = BridgProtoEnvelope()
         envelope.pairResponse = response
-        send(envelope)
+        sendOnQueue(envelope)
 
         encryptedTransport = EncryptedTransport(sharedKey: sharedKey, sending: .macToPhone)
         onPaired?(request.deviceName)
@@ -307,7 +341,7 @@ final class ConnectionManager {
         ack.accepted = true
         var envelope = BridgProtoEnvelope()
         envelope.pairResumeAck = ack
-        send(envelope)
+        sendOnQueue(envelope)
 
         onPaired?(device.name)
     }

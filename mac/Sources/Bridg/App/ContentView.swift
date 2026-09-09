@@ -164,13 +164,14 @@ struct FeatureCard: View {
     }
 }
 
-// Stub views for navigation destinations
 struct NotificationHistoryView: View {
     @EnvironmentObject var appState: AppState
+    @State private var replyingTo: String?
+    @State private var replyText: String = ""
 
     var body: some View {
         List(appState.notificationHistory) { item in
-            VStack(alignment: .leading) {
+            VStack(alignment: .leading, spacing: 6) {
                 Text(item.title)
                     .font(.headline)
                 Text(item.text)
@@ -179,9 +180,58 @@ struct NotificationHistoryView: View {
                 Text(item.appLabel)
                     .font(.caption)
                     .foregroundColor(.secondary)
+
+                actionRow(for: item)
+
+                if replyingTo == item.id {
+                    HStack {
+                        TextField("Reply…", text: $replyText)
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit { send(item) }
+                        Button("Send") { send(item) }
+                            .disabled(replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
             }
+            .padding(.vertical, 4)
         }
         .navigationTitle("Notification History")
+    }
+
+    @ViewBuilder
+    private func actionRow(for item: NotificationItem) -> some View {
+        HStack {
+            if item.isCall {
+                Button("Answer") { appState.sendCallControl(.answer) }
+                Button("Decline") { appState.sendCallControl(.reject) }
+                    .tint(.red)
+            }
+            if item.hasReplyAction {
+                Button(replyingTo == item.id ? "Cancel" : "Reply") {
+                    replyingTo = (replyingTo == item.id) ? nil : item.id
+                    replyText = ""
+                }
+            }
+            if let code = Self.verificationCode(in: item.text) {
+                Button("Copy Code") { appState.copyToClipboard(code) }
+            }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+    }
+
+    private func send(_ item: NotificationItem) {
+        let text = replyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        appState.sendNotificationReply(id: item.id, text: text)
+        replyingTo = nil
+        replyText = ""
+    }
+
+    /// First 4–8 digit run in the text — the common one-time-code shape.
+    static func verificationCode(in text: String) -> String? {
+        guard let range = text.range(of: #"\b\d{4,8}\b"#, options: .regularExpression) else { return nil }
+        return String(text[range])
     }
 }
 

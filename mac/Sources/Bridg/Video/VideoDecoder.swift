@@ -192,18 +192,27 @@ final class VideoDecoder {
 /// The mirror is reachable from two places at once — the standalone "Phone
 /// Mirror" window and the sidebar page in `ContentView` — so a single callback
 /// slot would leave whichever attached first showing black.
+///
+/// Views attach and detach on the main thread while frames are emitted from the
+/// network queue, so the table is behind a lock.
 final class VideoSinks {
+    private let lock = NSLock()
     private var sinks: [ObjectIdentifier: (CMSampleBuffer) -> Void] = [:]
 
     func attach(_ owner: AnyObject, _ sink: @escaping (CMSampleBuffer) -> Void) {
+        lock.lock(); defer { lock.unlock() }
         sinks[ObjectIdentifier(owner)] = sink
     }
 
     func detach(_ owner: AnyObject) {
+        lock.lock(); defer { lock.unlock() }
         sinks.removeValue(forKey: ObjectIdentifier(owner))
     }
 
     func emit(_ sampleBuffer: CMSampleBuffer) {
-        for sink in sinks.values { sink(sampleBuffer) }
+        lock.lock()
+        let current = Array(sinks.values)
+        lock.unlock()
+        for sink in current { sink(sampleBuffer) }
     }
 }

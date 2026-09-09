@@ -8,9 +8,14 @@ android/*.iml
 android/captures/
 android/externalNativeBuild/
 android/.cxx/
+android/keystore.properties
+android/*.jks
+android/*.keystore
+android/app/release/
 
 # Mac
 mac/.build/
+mac/build/
 mac/.swiftpm/
 mac/DerivedData/
 mac/*.xcodeproj/project.xcworkspace/xcuserdata/

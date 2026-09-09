@@ -1,10 +1,40 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.Bridg" parent="Theme.Material3.Light.NoActionBar">
-        <item name="colorPrimary">@color/primary</item>
+    <style name="Theme.Bridg" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/accent</item>
         <item name="colorOnPrimary">@color/white</item>
-        <item name="colorPrimaryContainer">@color/primary_light</item>
-        <item name="colorSecondary">@color/secondary</item>
-        <item name="colorOnSecondary">@color/white</item>
+        <item name="colorSecondary">@color/green</item>
+        <item name="android:colorBackground">@color/grouped_background</item>
+        <item name="android:windowBackground">@color/grouped_background</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">@bool/light_status_bar</item>
+        <item name="alertDialogTheme">@style/Theme.Bridg.Dialog</item>
+        <item name="materialAlertDialogTheme">@style/Theme.Bridg.Dialog</item>
+    </style>
+
+    <style name="Theme.Bridg.Dialog" parent="ThemeOverlay.Material3.MaterialAlertDialog.Centered">
+        <item name="shapeAppearanceOverlay">@style/Shape.Bridg.Dialog</item>
+        <item name="colorSurface">@color/card</item>
+    </style>
+
+    <style name="Shape.Bridg.Dialog" parent="">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">22dp</item>
+    </style>
+
+    <!-- Grouped-list section header: quiet, sentence case, sits above a card. -->
+    <style name="Text.SectionHeader" parent="">
+        <item name="android:textSize">13sp</item>
+        <item name="android:textColor">@color/label_secondary</item>
+        <item name="android:letterSpacing">0.01</item>
+        <item name="android:paddingStart">20dp</item>
+        <item name="android:paddingBottom">8dp</item>
+    </style>
+
+    <style name="Text.RowTitle" parent="">
+        <item name="android:textSize">17sp</item>
+        <item name="android:textColor">@color/label</item>
+        <item name="android:letterSpacing">-0.01</item>
     </style>
 </resources>

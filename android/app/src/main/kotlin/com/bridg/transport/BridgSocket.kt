@@ -21,6 +21,10 @@ class BridgSocket {
     @Volatile private var encryptedTransport: EncryptedTransport? = null
 
     private val sendQueue = Channel<Outgoing>(capacity = 256)
+
+    /** Frames queued but not yet written, so video can shed load before the queue fills. */
+    private val queueDepth = java.util.concurrent.atomic.AtomicInteger(0)
+    @Volatile private var droppedSinceKeyframe = false
     private var receiveListener: ((Envelope) -> Unit)? = null
     private var connectionListener: ConnectionListener? = null
 
@@ -44,9 +48,11 @@ class BridgSocket {
         try {
             val s = Socket().apply {
                 tcpNoDelay = true
-                // Must exceed the Mac's 10s ping interval, or an idle but healthy
-                // link is torn down on a read timeout.
-                soTimeout = 40_000
+                // Must exceed the Mac's 10s ping interval (or an idle but healthy
+                // link is torn down on a read timeout), but low enough that a
+                // dropped Wi-Fi / dead link is noticed promptly instead of the
+                // app sitting on "Connected" for 40s. ~2.5 missed pings.
+                soTimeout = 25_000
                 connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
             }
             socket = s
@@ -75,6 +81,32 @@ class BridgSocket {
     fun send(envelope: Envelope) {
         val result = sendQueue.trySend(Outgoing(envelope))
         if (result.isFailure) Log.w(TAG, "Send queue full — dropping ${envelope.payloadCase}")
+    }
+
+    /**
+     * Queue a video frame, dropping it if the socket is already behind.
+     *
+     * A stale mirror frame is worthless — showing it late is worse than not
+     * showing it — but [send] queued every one regardless, so a slow link built
+     * a backlog the mirror never recovered from. Drop non-keyframes past the
+     * watermark and let the caller ask the encoder for a fresh keyframe; that
+     * bounds latency instead of letting it grow.
+     *
+     * Returns true if the stream was interrupted and needs a keyframe.
+     */
+    fun sendVideoFrame(envelope: Envelope, isKeyframe: Boolean): Boolean {
+        if (!isKeyframe && queueDepth.get() >= VIDEO_DROP_WATERMARK) {
+            droppedSinceKeyframe = true
+            return false
+        }
+        queueDepth.incrementAndGet()
+        if (sendQueue.trySend(Outgoing(envelope)).isFailure) {
+            queueDepth.decrementAndGet()
+            droppedSinceKeyframe = true
+            return false
+        }
+        // The stream has a hole in it; only a keyframe closes it.
+        return droppedSinceKeyframe.also { if (it) droppedSinceKeyframe = false }
     }
 
     /**
@@ -127,6 +159,8 @@ class BridgSocket {
             // A channel blocks until there is work; the old loop polled a queue
             // with a 1ms delay and burned CPU whenever the link was idle.
             for (outgoing in sendQueue) {
+                // Only video is counted; the watermark measures video backlog.
+                if (outgoing.envelope.hasVideoFrame()) queueDepth.decrementAndGet()
                 val out = output ?: break
                 val envelope = outgoing.envelope
                 try {
@@ -179,5 +213,6 @@ class BridgSocket {
     companion object {
         private const val TAG = "BridgSocket"
         private const val CONNECT_TIMEOUT_MS = 10_000
+        private const val VIDEO_DROP_WATERMARK = 128 // half the queue
     }
 }

@@ -11,4 +11,23 @@
     <string name="pairing_failed">Pairing failed. Please try again.</string>
     <string name="accessibility_service_description">Bridg needs Accessibility access to inject tap, swipe, and keyboard input on your phone from your Mac.</string>
     <string name="notification_listener_description">Bridg needs Notification access to forward your phone notifications to your Mac.</string>
+    <string name="device_name_placeholder">This phone</string>
+    <string name="status_placeholder">Looking for your Mac</string>
+    <string name="state_looking">Not connected</string>
+    <string name="state_connected">Connected</string>
+    <string name="paired_none">No Macs paired yet</string>
+    <string name="section_send">Send to your Mac</string>
+    <string name="section_devices">Devices</string>
+    <string name="section_access">Permissions</string>
+    <string name="action_mirror">Mirror this screen</string>
+    <string name="action_mirror_detail">Watch and control your phone on the Mac</string>
+    <string name="action_send">Send files</string>
+    <string name="action_send_detail">Pick files to drop on the Mac</string>
+    <string name="action_pair">Pair a new Mac</string>
+    <string name="pair_footer">Open Bridg on your Mac and scan the QR code it shows.</string>
+    <string name="access_notifications">Notifications</string>
+    <string name="access_input">Remote input</string>
+    <string name="access_on">On</string>
+    <string name="access_off">Off</string>
+    <string name="connect_first">Connect to your Mac first</string>
 </resources>

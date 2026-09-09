@@ -29,6 +29,8 @@ message Envelope {
 
     InputEvent input_event = 50;
 
+    CallControl call_control = 52;
+
     VideoFrame video_frame = 60;
     VideoStreamStart video_stream_start = 61;
     VideoStreamStop video_stream_stop = 62;
@@ -159,8 +161,8 @@ message InputEvent {
   // Touch coordinates (normalized 0.0–1.0 relative to screen)
   float x = 2;
   float y = 3;
-  float x2 = 4;                // For pinch/swipe end point
-  float y2 = 5;
+  float x2 = 4;                // For swipe end point. For PINCH: x=y=center,
+  float y2 = 5;                // x2=start span, y2=end span (fraction of width).
   float velocity_x = 6;        // For fling gestures
   float velocity_y = 7;
 
@@ -173,6 +175,29 @@ message InputEvent {
 
   // Timestamp for ordering
   uint64 timestamp = 11;
+
+  // Gesture duration. 0 = use the default for the event type. Scroll flicks
+  // need a much shorter stroke than a deliberate drag.
+  int32 duration_ms = 12;
+}
+
+// ─── Call Control ────────────────────────────────────────────────────────────
+
+// Mac → phone. Control an ongoing or ringing phone call. The incoming-call
+// notification already reaches the Mac through NotificationEvent; this is the
+// reply channel for acting on it.
+message CallControl {
+  enum Action {
+    ACTION_UNSPECIFIED = 0;
+    ANSWER = 1;          // Accept a ringing call
+    REJECT = 2;          // Reject a ringing call (same as END on Android)
+    END = 3;             // Hang up the active call
+    MUTE = 4;            // Mute the microphone
+    UNMUTE = 5;
+    SPEAKER_ON = 6;
+    SPEAKER_OFF = 7;
+  }
+  Action action = 1;
 }
 
 // ─── Video ───────────────────────────────────────────────────────────────────

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="grouped_background">#000000</color>
+    <color name="card">#1C1C1E</color>
+    <color name="label">#FFFFFF</color>
+    <color name="label_secondary">#98989E</color>
+    <color name="label_tertiary">#6C6C70</color>
+    <color name="separator">#38383A</color>
+    <color name="fill_quaternary">#2C2C2E</color>
+
+    <color name="accent">#0A84FF</color>
+    <color name="accent_pressed">#0A6FD8</color>
+    <color name="green">#30D158</color>
+    <color name="orange">#FF9F0A</color>
+    <color name="indigo">#5E5CE6</color>
+    <color name="red">#FF453A</color>
+</resources>

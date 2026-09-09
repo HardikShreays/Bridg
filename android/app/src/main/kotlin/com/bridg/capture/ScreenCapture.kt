@@ -300,10 +300,13 @@ class ScreenCapture(private val context: Context) {
         private const val VIRTUAL_DISPLAY_NAME = "BridgMirror"
         private const val DEFAULT_WIDTH = 1080
         private const val DEFAULT_HEIGHT = 1920
-        private const val MAX_SHORT_EDGE = 1080
+        // 720p at 4 Mbps. 1080p/8 Mbps was more than a typical 2.4GHz link
+        // carries, so frames backed up in the send queue and the mirror ran
+        // permanently behind. Raise these if the link is known-fast.
+        private const val MAX_SHORT_EDGE = 720
         private const val DEQUEUE_TIMEOUT_US = 100_000L
         private const val DEFAULT_FPS = 30
-        private const val DEFAULT_BITRATE = 8_000_000 // 8 Mbps
+        private const val DEFAULT_BITRATE = 4_000_000 // 4 Mbps
         private const val I_FRAME_INTERVAL = 2 // seconds
     }
 }

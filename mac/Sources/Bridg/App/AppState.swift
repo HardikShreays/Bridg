@@ -34,10 +34,11 @@ final class AppState: ObservableObject {
     private let clipboardSync = ClipboardSync()
     private let notificationManager = NotificationManager()
     private let fileTransferManager = FileTransferManager()
-    private let videoDecoder = VideoDecoder()
+    // Driven from ConnectionManager's network queue, never from the main actor.
+    nonisolated(unsafe) private let videoDecoder = VideoDecoder()
 
     /// Where `MirrorView`'s display layers subscribe for decoded frames.
-    let videoSinks = VideoSinks()
+    nonisolated(unsafe) let videoSinks = VideoSinks()
 
     init() {
         pairedDeviceName = keychainManager.getPairedDevices().first?.name
@@ -98,15 +99,77 @@ final class AppState: ObservableObject {
         send(event)
     }
 
-    func sendSwipe(from start: CGPoint, to end: CGPoint) {
+    /// `durationMs` of 0 lets the phone pick its default. Trackpad scrolls pass
+    /// a short duration so they register as flicks rather than slow drags.
+    func sendSwipe(from start: CGPoint, to end: CGPoint, durationMs: Int32 = 0) {
         var event = BridgProtoInputEvent()
         event.type = .swipe
         event.x = Float(start.x)
         event.y = Float(start.y)
         event.x2 = Float(end.x)
         event.y2 = Float(end.y)
+        event.durationMs = durationMs
         event.timestamp = UInt64(Date().timeIntervalSince1970 * 1_000_000)
         send(event)
+    }
+
+    func sendLongPress(x: CGFloat, y: CGFloat) {
+        var event = BridgProtoInputEvent()
+        event.type = .longPress
+        event.x = Float(x)
+        event.y = Float(y)
+        event.timestamp = UInt64(Date().timeIntervalSince1970 * 1_000_000)
+        send(event)
+    }
+
+    /// Trackpad pinch: two fingers around `center`, moving from `startSpan` to
+    /// `endSpan` apart (both a fraction of the phone's screen width).
+    func sendPinch(center: CGPoint, startSpan: CGFloat, endSpan: CGFloat, durationMs: Int32 = 0) {
+        var event = BridgProtoInputEvent()
+        event.type = .pinch
+        event.x = Float(center.x)
+        event.y = Float(center.y)
+        event.x2 = Float(startSpan)
+        event.y2 = Float(endSpan)
+        event.durationMs = durationMs
+        event.timestamp = UInt64(Date().timeIntervalSince1970 * 1_000_000)
+        send(event)
+    }
+
+    /// Characters typed on the Mac keyboard while the mirror has focus.
+    func sendText(_ text: String) {
+        var event = BridgProtoInputEvent()
+        event.type = .textInput
+        event.text = text
+        event.timestamp = UInt64(Date().timeIntervalSince1970 * 1_000_000)
+        send(event)
+    }
+
+    /// Editing keys (backspace, return) as Android keycodes.
+    func sendKeycode(_ keycode: Int32) {
+        var event = BridgProtoInputEvent()
+        event.type = .keyDown
+        event.keycode = keycode
+        event.timestamp = UInt64(Date().timeIntervalSince1970 * 1_000_000)
+        send(event)
+    }
+
+    /// Send a typed reply to a phone notification (used by both the system
+    /// notification's Reply button and the in-app Notifications list).
+    func sendNotificationReply(id: String, text: String) {
+        var action = BridgProtoNotificationAction()
+        action.actionID = id
+        action.label = text
+        var envelope = BridgProtoEnvelope()
+        envelope.notifAction = action
+        connectionManager.send(envelope)
+    }
+
+    /// Put a string on the Mac clipboard (in-app "Copy Code" action).
+    func copyToClipboard(_ string: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(string, forType: .string)
     }
 
     /// Answer / hang up / mute / speaker on the phone's current call.
@@ -149,6 +212,33 @@ final class AppState: ObservableObject {
 
         connectionManager.onMessage = { [weak self] envelope in
             Task { @MainActor in self?.route(envelope) }
+        }
+
+        // Video arrives on the network queue and is decoded there; only the
+        // published UI state hops to the main actor.
+        connectionManager.onVideoMessage = { [weak self] envelope in
+            guard let self else { return }
+            switch envelope.payload {
+            case .videoStreamStart(let start):
+                self.videoDecoder.configure(spsPps: start.spsPps)
+                Task { @MainActor in
+                    self.isScreenMirroring = true
+                    if start.width > 0, start.height > 0 {
+                        self.mirrorAspectRatio = CGFloat(start.width) / CGFloat(start.height)
+                    }
+                }
+            case .videoFrame(let frame):
+                self.videoDecoder.decode(
+                    nalUnits: frame.nalUnits,
+                    pts: Int64(frame.pts),
+                    isKeyframe: frame.isKeyframe
+                )
+            case .videoStreamStop:
+                self.videoDecoder.reset()
+                Task { @MainActor in self.isScreenMirroring = false }
+            default:
+                break
+            }
         }
     }
 
@@ -198,14 +288,8 @@ final class AppState: ObservableObject {
             self?.videoSinks.emit(sampleBuffer)
         }
 
-        notificationManager.onReply = { [weak self] notificationId, actionId, text in
-            var action = BridgProtoNotificationAction()
-            action.actionID = actionId
-            action.label = text
-            var envelope = BridgProtoEnvelope()
-            envelope.notifAction = action
-            self?.connectionManager.send(envelope)
-            _ = notificationId
+        notificationManager.onReply = { [weak self] notificationId, _, text in
+            self?.sendNotificationReply(id: notificationId, text: text)
         }
 
         notificationManager.onCallAction = { [weak self] action in
@@ -232,7 +316,8 @@ final class AppState: ObservableObject {
                     title: event.title,
                     text: event.text,
                     timestamp: Date(timeIntervalSince1970: Double(event.timestamp) / 1000),
-                    hasReplyAction: event.hasReplyAction_p
+                    hasReplyAction: event.hasReplyAction_p,
+                    isCall: event.isCall
                 ),
                 at: 0
             )
@@ -250,26 +335,6 @@ final class AppState: ObservableObject {
 
         case .fileAck(let ack):
             fileTransferManager.handleAck(ack)
-
-        case .videoStreamStart(let start):
-            isScreenMirroring = true
-            if start.width > 0, start.height > 0 {
-                mirrorAspectRatio = CGFloat(start.width) / CGFloat(start.height)
-            }
-            videoDecoder.configure(spsPps: start.spsPps)
-
-        // Without this case every encoded frame fell through to `default` and
-        // was printed and dropped — the mirror could never show anything.
-        case .videoFrame(let frame):
-            videoDecoder.decode(
-                nalUnits: frame.nalUnits,
-                pts: Int64(frame.pts),
-                isKeyframe: frame.isKeyframe
-            )
-
-        case .videoStreamStop:
-            isScreenMirroring = false
-            videoDecoder.reset()
 
         default:
             print("Unhandled message: \(String(describing: envelope.payload))")
@@ -303,6 +368,7 @@ struct NotificationItem: Identifiable {
     let text: String
     let timestamp: Date
     let hasReplyAction: Bool
+    let isCall: Bool
 }
 
 struct TransferInfo: Identifiable {

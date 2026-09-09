@@ -432,16 +432,21 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
                 }
 
                 override fun onVideoFrame(nalUnits: ByteArray, pts: Long, isKeyframe: Boolean) {
-                    bridgSocket.send(
-                        Envelope.newBuilder().setVideoFrame(
-                            VideoFrame.newBuilder()
-                                .setStreamId("screen")
-                                .setNalUnits(com.google.protobuf.ByteString.copyFrom(nalUnits))
-                                .setPts(pts)
-                                .setIsKeyframe(isKeyframe)
-                                .build()
-                        ).build()
-                    )
+                    val envelope = Envelope.newBuilder().setVideoFrame(
+                        VideoFrame.newBuilder()
+                            .setStreamId("screen")
+                            .setNalUnits(com.google.protobuf.ByteString.copyFrom(nalUnits))
+                            .setPts(pts)
+                            .setIsKeyframe(isKeyframe)
+                            .build()
+                    ).build()
+
+                    // Frames the socket had to drop leave the Mac's decoder
+                    // referencing pictures it never got; without this it stays
+                    // broken until the next scheduled I-frame, two seconds out.
+                    if (bridgSocket.sendVideoFrame(envelope, isKeyframe)) {
+                        screenCapture.requestKeyframe()
+                    }
                 }
             })
         } catch (e: Exception) {
@@ -528,6 +533,17 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
         val audio = getSystemService(AUDIO_SERVICE) as android.media.AudioManager
         when (action) {
             CallControl.Action.ANSWER, CallControl.Action.END, CallControl.Action.REJECT -> {
+                // App-VoIP calls (WhatsApp, Telegram…) have no telephony call
+                // behind them, so acceptRingingCall()/headset-hook do nothing —
+                // fire the notification's own action instead. Only reach for
+                // TelecomManager when a real cellular call is actually ringing.
+                if (!callRinging &&
+                    BridgNotificationListenerService.instance
+                        ?.fireCallAction(answer = action == CallControl.Action.ANSWER) == true
+                ) {
+                    return
+                }
+
                 val telecom = getSystemService(TELECOM_SERVICE) as android.telecom.TelecomManager
                 val granted = checkSelfPermission(android.Manifest.permission.ANSWER_PHONE_CALLS) ==
                     android.content.pm.PackageManager.PERMISSION_GRANTED
@@ -653,12 +669,28 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
             PendingIntent.FLAG_IMMUTABLE
         )
 
+        // Reading the clipboard needs foreground focus on Android 10+, so this
+        // routes through a transparent activity that grabs focus and finishes.
+        val clipboardIntent = PendingIntent.getActivity(
+            this, 1,
+            Intent(this, com.bridg.ui.ClipboardBridgeActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION),
+            PendingIntent.FLAG_IMMUTABLE
+        )
+
         return Notification.Builder(this, BridgApplication.CHANNEL_SERVICE)
             .setContentTitle("Bridg")
             .setContentText(contentText)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
+            .addAction(
+                Notification.Action.Builder(
+                    android.graphics.drawable.Icon.createWithResource(this, R.mipmap.ic_launcher),
+                    "Send clipboard",
+                    clipboardIntent
+                ).build()
+            )
             .build()
     }
 

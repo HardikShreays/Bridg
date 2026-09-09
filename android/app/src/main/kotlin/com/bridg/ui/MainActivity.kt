@@ -35,7 +35,7 @@ class MainActivity : AppCompatActivity() {
             bridgService = (binder as BridgService.LocalBinder).getService()
             isBound = true
             // Push status straight into the UI instead of the old TODO comments.
-            bridgService?.onStatusChanged = { text -> runOnUiThread { binding.statusText.text = text } }
+            bridgService?.onStatusChanged = { _ -> runOnUiThread { updateUI() } }
             updateUI()
             // The bind can land after onResume; sync once we actually have the service.
             bridgService?.syncClipboardNow()
@@ -68,9 +68,19 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        // Content runs under the status bar; the root layout insets itself.
+        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
 
         keyManager = KeyManager(this)
         requestPermissions()
+
+        binding.rowNotificationAccess.setOnClickListener {
+            startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+        }
+
+        binding.rowAccessibilityAccess.setOnClickListener {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
 
         binding.btnPair.setOnClickListener {
             startActivity(Intent(this, PairingActivity::class.java))
@@ -78,7 +88,7 @@ class MainActivity : AppCompatActivity() {
 
         binding.btnStartCapture.setOnClickListener {
             if (bridgService?.isConnected() != true) {
-                Toast.makeText(this, "Connect to your Mac first", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, getString(R.string.connect_first), Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
             val manager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -87,7 +97,7 @@ class MainActivity : AppCompatActivity() {
 
         binding.btnSendFile.setOnClickListener {
             if (bridgService?.isConnected() != true) {
-                Toast.makeText(this, "Connect to your Mac first", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, getString(R.string.connect_first), Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
             filePickerLauncher.launch(arrayOf("*/*"))
@@ -141,7 +151,7 @@ class MainActivity : AppCompatActivity() {
         if (uris.isEmpty()) return
 
         if (bridgService?.isConnected() != true) {
-            Toast.makeText(this, "Connect to your Mac first", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.connect_first), Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -228,6 +238,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkPermissions() {
+        if (permissionsPrompted) return
+        permissionsPrompted = true
         if (!isNotificationListenerEnabled()) {
             showPermissionDialog(
                 "Notification Access",
@@ -268,9 +280,37 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateUI() {
         binding.deviceNameText.text = keyManager.getDeviceName()
-        binding.pairedCountText.text = "${keyManager.getPairedDevices().size} paired device(s)"
+
+        val paired = keyManager.getPairedDevices().size
+        binding.pairedCountText.text = when (paired) {
+            0 -> getString(R.string.paired_none)
+            1 -> "1 Mac paired"
+            else -> "$paired Macs paired"
+        }
+
         bridgService?.let { binding.statusText.text = it.statusText }
+
+        val connected = bridgService?.isConnected() == true
+        binding.statusDot.backgroundTintList = ContextCompat.getColorStateList(
+            this, if (connected) R.color.green else R.color.orange
+        )
+        binding.connectionLabel.setText(
+            if (connected) R.string.state_connected else R.string.state_looking
+        )
+
+        renderAccess(binding.notificationAccessState, isNotificationListenerEnabled())
+        renderAccess(binding.accessibilityAccessState, isAccessibilityEnabled())
     }
+
+    private fun renderAccess(view: android.widget.TextView, enabled: Boolean) {
+        view.setText(if (enabled) R.string.access_on else R.string.access_off)
+        view.setTextColor(
+            ContextCompat.getColor(this, if (enabled) R.color.label_secondary else R.color.orange)
+        )
+    }
+
+    /** The settings dialogs interrupt once per launch; the Permissions rows show the rest. */
+    private var permissionsPrompted = false
 
     companion object {
         private const val REQUEST_PERMISSIONS = 100
