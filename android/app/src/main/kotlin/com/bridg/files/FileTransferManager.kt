@@ -43,6 +43,10 @@ class FileTransferManager(private val context: Context) {
         val state = activeTransfers[ack.transferId] ?: return
         if (ack.error.isNotEmpty()) {
             Log.e(TAG, "Peer rejected transfer ${ack.transferId}: ${ack.error}")
+            // Tell the sending thread to stop before dropping the state, or it
+            // keeps pushing chunks at a peer that has already thrown the
+            // transfer away — one error ack bounced back per chunk.
+            state.error = ack.error
             activeTransfers.remove(ack.transferId)
             transferListener?.onTransferError(ack.transferId, ack.error)
         } else if (ack.complete) {
@@ -284,6 +288,7 @@ class FileTransferManager(private val context: Context) {
                 if (Thread.currentThread().isInterrupted) {
                     throw InterruptedException("Transfer interrupted")
                 }
+                state.error?.let { throw java.io.IOException("Peer aborted transfer: $it") }
 
                 val chunkData = if (bytesRead == CHUNK_SIZE) buffer else buffer.copyOf(bytesRead)
 

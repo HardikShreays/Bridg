@@ -49,41 +49,16 @@ struct SettingsView: View {
                 }
             }
 
-            // Device Info
-            Section("Device") {
-                HStack {
-                    Text("Device Name")
-                    Spacer()
-                    Text(Host.current().localizedName ?? "Mac")
-                        .foregroundColor(.secondary)
-                }
-
-                if let device = appState.pairedDeviceName {
-                    HStack {
-                        Text("Paired Device")
-                        Spacer()
-                        Text(device)
-                            .foregroundColor(.secondary)
-                    }
-                }
-
-                Button("Unpair Device") {
-                    appState.unpairAll()
-                }
-                .disabled(appState.pairedDeviceName == nil)
-                .foregroundColor(.red)
-            }
-
             // About
             Section("About") {
                 HStack {
                     Text("Version")
                     Spacer()
-                    Text("0.1.0")
+                    Text("0.2.0")
                         .foregroundColor(.secondary)
                 }
 
-                Link("View on GitHub", destination: URL(string: "https://github.com/bridg/bridg")!)
+                Link("View on GitHub", destination: URL(string: "https://github.com/HardikShreays/Bridg")!)
             }
         }
         .formStyle(.grouped)

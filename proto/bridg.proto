@@ -34,6 +34,10 @@ message Envelope {
     VideoFrame video_frame = 60;
     VideoStreamStart video_stream_start = 61;
     VideoStreamStop video_stream_stop = 62;
+    AudioFrame audio_frame = 63;
+
+    MediaState media_state = 70;
+    MediaCommand media_command = 71;
 
     Ping ping = 100;
     Pong pong = 101;
@@ -224,6 +228,40 @@ message VideoFrame {
 
 message VideoStreamStop {
   string stream_id = 1;
+}
+
+// Phone → Mac. The phone's own playback, captured alongside the screen.
+// ponytail: raw PCM, no codec on either side. ~1.5 Mbps on a LAN we already
+// push 4 Mbps of video over. Swap in AAC/Opus if this ever runs over anything
+// slower than Wi-Fi.
+message AudioFrame {
+  bytes pcm = 1;                // 16-bit little-endian, interleaved
+  uint32 sample_rate = 2;
+  uint32 channels = 3;
+}
+
+// ─── Media Control ───────────────────────────────────────────────────────────
+
+// Phone → Mac. What the phone is playing right now, from MediaSession — not
+// from the player's notification, which re-posts on every position tick.
+message MediaState {
+  string package_name = 1;
+  string app_label = 2;
+  string title = 3;
+  string artist = 4;
+  bool playing = 5;
+  bool active = 6;              // false = nothing is playing, hide the control
+}
+
+// Mac → phone.
+message MediaCommand {
+  enum Action {
+    ACTION_UNSPECIFIED = 0;
+    PLAY_PAUSE = 1;
+    NEXT = 2;
+    PREVIOUS = 3;
+  }
+  Action action = 1;
 }
 
 // ─── Session Management ─────────────────────────────────────────────────────

@@ -10,8 +10,13 @@ struct ContentView: View {
             // Sidebar
             List {
                 Section("Connection") {
-                    Label(appState.connectionState.displayText, systemImage: connectionIcon)
-                        .foregroundColor(appState.connectionState.isConnected ? .green : .secondary)
+                    NavigationLink {
+                        ConnectionView()
+                            .environmentObject(appState)
+                    } label: {
+                        Label(appState.connectionState.displayText, systemImage: connectionIcon)
+                            .foregroundColor(appState.connectionState.isConnected ? .green : .secondary)
+                    }
 
                     if let deviceName = appState.pairedDeviceName {
                         Label(deviceName, systemImage: "iphone")
@@ -119,6 +124,12 @@ struct HomeDetailView: View {
                     )
                 }
                 .padding(.top, 20)
+
+                if appState.nowPlaying != nil {
+                    NowPlayingView()
+                        .environmentObject(appState)
+                        .frame(maxWidth: 520)
+                }
             } else if let qr = appState.pairingQRCode {
                 Image(nsImage: qr)
                     .interpolation(.none)
@@ -196,6 +207,14 @@ struct NotificationHistoryView: View {
             .padding(.vertical, 4)
         }
         .navigationTitle("Notification History")
+        .toolbar {
+            Button("Clear All") {
+                for item in appState.notificationHistory {
+                    appState.dismissNotification(id: item.id)
+                }
+            }
+            .disabled(appState.notificationHistory.isEmpty)
+        }
     }
 
     @ViewBuilder
@@ -215,6 +234,11 @@ struct NotificationHistoryView: View {
             if let code = Self.verificationCode(in: item.text) {
                 Button("Copy Code") { appState.copyToClipboard(code) }
             }
+            Spacer()
+            // Clears it on the phone too, so the same alert isn't waiting when
+            // you pick the phone back up.
+            Button("Delete") { appState.dismissNotification(id: item.id) }
+                .tint(.red)
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
@@ -302,5 +326,120 @@ struct FileTransferView: View {
         }
         .padding(.top, appState.lastTransferError != nil ? 8 : 0)
         .navigationTitle("File Transfer")
+    }
+}
+
+/// Everything about the link to the phone, in one place: who is paired, what
+/// state the connection is in, and how to get out of a stuck one.
+struct ConnectionView: View {
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        Form {
+            Section("Status") {
+                HStack {
+                    Text("State")
+                    Spacer()
+                    Text(appState.connectionState.displayText)
+                        .foregroundColor(appState.connectionState.isConnected ? .green : .secondary)
+                }
+            }
+
+            Section("Device") {
+                HStack {
+                    Text("This Mac")
+                    Spacer()
+                    Text(Host.current().localizedName ?? "Mac")
+                        .foregroundColor(.secondary)
+                }
+                HStack {
+                    Text("Paired Phone")
+                    Spacer()
+                    Text(appState.pairedDeviceName ?? "None")
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Section {
+                if !appState.connectionState.isConnected {
+                    Button("Show Pairing QR Code") { appState.startPairing() }
+                }
+                Button("Unpair Device") { appState.unpairAll() }
+                    .disabled(appState.pairedDeviceName == nil)
+                    .foregroundColor(.red)
+            }
+
+            Section {
+                Label {
+                    Text("If there is some connection issue, completely restart both apps :)")
+                } icon: {
+                    Image(systemName: "lightbulb")
+                        .foregroundColor(.yellow)
+                }
+                .font(.callout)
+            }
+
+            if appState.pairingQRCode != nil, let qr = appState.pairingQRCode {
+                Section("Pair a Phone") {
+                    HStack {
+                        Spacer()
+                        VStack(spacing: 8) {
+                            Image(nsImage: qr)
+                                .interpolation(.none)
+                                .frame(width: 200, height: 200)
+                            Text("Open Bridg on your phone and tap \"Pair New Device\"")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .navigationTitle("Connection")
+    }
+}
+
+/// Transport controls for whatever the phone is playing (Spotify, Apple Music,
+/// YouTube…). Driven by the phone's MediaSession, not by its notification —
+/// which is why the player no longer spams the notification list.
+struct NowPlayingView: View {
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        if let media = appState.nowPlaying {
+            HStack(spacing: 16) {
+                Image(systemName: "music.note")
+                    .font(.title2)
+                    .foregroundColor(.accentColor)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(media.title)
+                        .font(.headline)
+                        .lineLimit(1)
+                    Text(media.artist.isEmpty ? media.appLabel : "\(media.artist) — \(media.appLabel)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                Button { appState.sendMediaCommand(.previous) } label: {
+                    Image(systemName: "backward.fill")
+                }
+                Button { appState.sendMediaCommand(.playPause) } label: {
+                    Image(systemName: media.isPlaying ? "pause.fill" : "play.fill")
+                }
+                Button { appState.sendMediaCommand(.next) } label: {
+                    Image(systemName: "forward.fill")
+                }
+            }
+            .buttonStyle(.bordered)
+            .padding(12)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .cornerRadius(12)
+        }
     }
 }

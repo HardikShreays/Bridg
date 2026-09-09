@@ -1,4 +1,5 @@
 import XCTest
+import AVFoundation
 import CryptoKit
 @testable import Bridg
 
@@ -132,5 +133,30 @@ final class BridgTests: XCTestCase {
         let macNonce = mac.encrypt(message)!.prefix(12)
         let phoneNonce = phone.encrypt(message)!.prefix(12)
         XCTAssertNotEqual(macNonce, phoneNonce)
+    }
+
+    /// Deinterleaving is the one piece of real logic in the mirror's audio
+    /// path: get the channel order or the endianness wrong and playback is
+    /// swapped or noise, with nothing to point at.
+    func testAudioPlayerDeinterleavesLittleEndianPCM() {
+        let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
+        // Two stereo frames: L=+16384, R=-16384 then L=0, R=32767 (max).
+        let samples: [Int16] = [16384, -16384, 0, 32767]
+        var pcm = Data()
+        for sample in samples {
+            let bits = UInt16(bitPattern: sample)
+            pcm.append(UInt8(bits & 0xFF))
+            pcm.append(UInt8(bits >> 8))
+        }
+
+        let buffer = AudioPlayer().makeBuffer(from: pcm, format: format)
+        XCTAssertNotNil(buffer)
+        XCTAssertEqual(buffer?.frameLength, 2)
+
+        let channels = buffer!.floatChannelData!
+        XCTAssertEqual(channels[0][0], 0.5, accuracy: 0.0001)
+        XCTAssertEqual(channels[1][0], -0.5, accuracy: 0.0001)
+        XCTAssertEqual(channels[0][1], 0.0, accuracy: 0.0001)
+        XCTAssertEqual(channels[1][1], 1.0, accuracy: 0.0001)
     }
 }

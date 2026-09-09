@@ -25,6 +25,10 @@
     <!-- Notifications -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Mirror audio: AudioPlaybackCapture is an AudioRecord, so it needs
+         RECORD_AUDIO even though no microphone is involved. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
     <!-- Call control from the Mac -->
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
@@ -34,6 +38,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- USB -->
@@ -88,7 +93,7 @@
         <service
             android:name=".service.BridgService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice|mediaProjection" />
+            android:foregroundServiceType="connectedDevice|mediaProjection|microphone" />
 
         <!-- Notification listener for forwarding phone notifications -->
         <service

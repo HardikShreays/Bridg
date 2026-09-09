@@ -20,6 +20,8 @@ final class AppState: ObservableObject {
     /// Aspect ratio of the incoming mirror stream, from its VideoStreamStart.
     @Published var mirrorAspectRatio: CGFloat = 9.0 / 16.0
     @Published var notificationHistory: [NotificationItem] = []
+    /// What the phone is playing right now, or nil when nothing is.
+    @Published var nowPlaying: MediaItem?
     @Published var activeTransfers: [TransferInfo] = []
     /// Set on any failed transfer so `FileTransferView` can show it, instead
     /// of the transfer just silently disappearing from the list.
@@ -34,6 +36,8 @@ final class AppState: ObservableObject {
     private let clipboardSync = ClipboardSync()
     private let notificationManager = NotificationManager()
     private let fileTransferManager = FileTransferManager()
+    // Fed from the network queue alongside video, never from the main actor.
+    nonisolated(unsafe) private let audioPlayer = AudioPlayer()
     // Driven from ConnectionManager's network queue, never from the main actor.
     nonisolated(unsafe) private let videoDecoder = VideoDecoder()
 
@@ -165,6 +169,30 @@ final class AppState: ObservableObject {
         connectionManager.send(envelope)
     }
 
+    /// Delete a notification here and on the phone.
+    ///
+    /// The id is the phone's own StatusBarNotification key, so this clears the
+    /// exact notification the Mac was showing rather than a same-app sibling.
+    func dismissNotification(id: String) {
+        notificationHistory.removeAll { $0.id == id }
+        notificationManager.dismissNotification(id: id)
+
+        var dismiss = BridgProtoNotificationDismiss()
+        dismiss.id = id
+        var envelope = BridgProtoEnvelope()
+        envelope.notifDismiss = dismiss
+        connectionManager.send(envelope)
+    }
+
+    /// Play/pause, next, previous on whatever the phone is playing.
+    func sendMediaCommand(_ action: BridgProtoMediaCommand.Action) {
+        var command = BridgProtoMediaCommand()
+        command.action = action
+        var envelope = BridgProtoEnvelope()
+        envelope.mediaCommand = command
+        connectionManager.send(envelope)
+    }
+
     /// Put a string on the Mac clipboard (in-app "Copy Code" action).
     func copyToClipboard(_ string: String) {
         let pasteboard = NSPasteboard.general
@@ -196,9 +224,11 @@ final class AppState: ObservableObject {
         }
 
         connectionManager.onDisconnected = { [weak self] in
+            self?.audioPlayer.stop()
             Task { @MainActor in
                 self?.connectionState = .discovering
                 self?.isScreenMirroring = false
+                self?.nowPlaying = nil
             }
         }
 
@@ -211,7 +241,18 @@ final class AppState: ObservableObject {
         }
 
         connectionManager.onMessage = { [weak self] envelope in
-            Task { @MainActor in self?.route(envelope) }
+            // FIFO, deliberately — not `Task { @MainActor in ... }`.
+            //
+            // An unstructured Task per envelope carries no ordering guarantee,
+            // so under load the main actor could run them in a different order
+            // than they arrived. File transfer is a strictly ordered stream and
+            // rejects a chunk that doesn't start where the last one ended, so a
+            // single reordered pair failed the transfer and deleted the
+            // half-written file — "sometimes it works" being the tell.
+            // DispatchQueue.main is FIFO, which is what this stream needs.
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.route(envelope) }
+            }
         }
 
         // Video arrives on the network queue and is decoded there; only the
@@ -233,8 +274,15 @@ final class AppState: ObservableObject {
                     pts: Int64(frame.pts),
                     isKeyframe: frame.isKeyframe
                 )
+            case .audioFrame(let frame):
+                self.audioPlayer.play(
+                    pcm: frame.pcm,
+                    sampleRate: frame.sampleRate,
+                    channels: frame.channels
+                )
             case .videoStreamStop:
                 self.videoDecoder.reset()
+                self.audioPlayer.stop()
                 Task { @MainActor in self.isScreenMirroring = false }
             default:
                 break
@@ -295,6 +343,12 @@ final class AppState: ObservableObject {
         notificationManager.onCallAction = { [weak self] action in
             self?.sendCallControl(action)
         }
+
+        // Clearing a banner on the Mac clears it on the phone too, so the same
+        // alert doesn't greet you again when you pick the phone up.
+        notificationManager.onDismiss = { [weak self] id in
+            Task { @MainActor in self?.dismissNotification(id: id) }
+        }
     }
 
     /// Route a decoded message to the feature that owns it.
@@ -324,6 +378,17 @@ final class AppState: ObservableObject {
 
         case .notifDismiss(let dismiss):
             notificationManager.dismissNotification(id: dismiss.id)
+            notificationHistory.removeAll { $0.id == dismiss.id }
+
+        case .mediaState(let state):
+            nowPlaying = state.active
+                ? MediaItem(
+                    appLabel: state.appLabel,
+                    title: state.title,
+                    artist: state.artist,
+                    isPlaying: state.playing
+                )
+                : nil
 
         case .fileStart(let start):
             fileTransferManager.handleTransferStart(start)
@@ -369,6 +434,13 @@ struct NotificationItem: Identifiable {
     let timestamp: Date
     let hasReplyAction: Bool
     let isCall: Bool
+}
+
+struct MediaItem: Equatable {
+    let appLabel: String
+    let title: String
+    let artist: String
+    let isPlaying: Bool
 }
 
 struct TransferInfo: Identifiable {

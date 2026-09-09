@@ -216,6 +216,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Mirror audio rides on AudioPlaybackCapture, which counts as recording.
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            permissions.add(Manifest.permission.RECORD_AUDIO)
+        }
+
         // Needed to answer/end calls from the Mac via TelecomManager; without it
         // BridgService falls back to the accessibility headset-hook key.
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ANSWER_PHONE_CALLS)

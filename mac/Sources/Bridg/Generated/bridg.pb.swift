@@ -172,6 +172,30 @@ nonisolated struct BridgProtoEnvelope: Sendable {
     set {payload = .videoStreamStop(newValue)}
   }
 
+  var audioFrame: BridgProtoAudioFrame {
+    get {
+      if case .audioFrame(let v)? = payload {return v}
+      return BridgProtoAudioFrame()
+    }
+    set {payload = .audioFrame(newValue)}
+  }
+
+  var mediaState: BridgProtoMediaState {
+    get {
+      if case .mediaState(let v)? = payload {return v}
+      return BridgProtoMediaState()
+    }
+    set {payload = .mediaState(newValue)}
+  }
+
+  var mediaCommand: BridgProtoMediaCommand {
+    get {
+      if case .mediaCommand(let v)? = payload {return v}
+      return BridgProtoMediaCommand()
+    }
+    set {payload = .mediaCommand(newValue)}
+  }
+
   var ping: BridgProtoPing {
     get {
       if case .ping(let v)? = payload {return v}
@@ -224,6 +248,9 @@ nonisolated struct BridgProtoEnvelope: Sendable {
     case videoFrame(BridgProtoVideoFrame)
     case videoStreamStart(BridgProtoVideoStreamStart)
     case videoStreamStop(BridgProtoVideoStreamStop)
+    case audioFrame(BridgProtoAudioFrame)
+    case mediaState(BridgProtoMediaState)
+    case mediaCommand(BridgProtoMediaCommand)
     case ping(BridgProtoPing)
     case pong(BridgProtoPong)
     case sessionLock(BridgProtoSessionLock)
@@ -785,6 +812,107 @@ nonisolated struct BridgProtoVideoStreamStop: Sendable {
   init() {}
 }
 
+/// Phone → Mac. The phone's own playback, captured alongside the screen.
+/// ponytail: raw PCM, no codec on either side. ~1.5 Mbps on a LAN we already
+/// push 4 Mbps of video over. Swap in AAC/Opus if this ever runs over anything
+/// slower than Wi-Fi.
+nonisolated struct BridgProtoAudioFrame: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// 16-bit little-endian, interleaved
+  var pcm: Data = Data()
+
+  var sampleRate: UInt32 = 0
+
+  var channels: UInt32 = 0
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+/// Phone → Mac. What the phone is playing right now, from MediaSession — not
+/// from the player's notification, which re-posts on every position tick.
+nonisolated struct BridgProtoMediaState: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var packageName: String = String()
+
+  var appLabel: String = String()
+
+  var title: String = String()
+
+  var artist: String = String()
+
+  var playing: Bool = false
+
+  /// false = nothing is playing, hide the control
+  var active: Bool = false
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+/// Mac → phone.
+nonisolated struct BridgProtoMediaCommand: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var action: BridgProtoMediaCommand.Action = .unspecified
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  nonisolated enum Action: SwiftProtobuf.Enum, Swift.CaseIterable {
+    typealias RawValue = Int
+    case unspecified // = 0
+    case playPause // = 1
+    case next // = 2
+    case previous // = 3
+    case UNRECOGNIZED(Int)
+
+    init() {
+      self = .unspecified
+    }
+
+    init?(rawValue: Int) {
+      switch rawValue {
+      case 0: self = .unspecified
+      case 1: self = .playPause
+      case 2: self = .next
+      case 3: self = .previous
+      default: self = .UNRECOGNIZED(rawValue)
+      }
+    }
+
+    var rawValue: Int {
+      switch self {
+      case .unspecified: return 0
+      case .playPause: return 1
+      case .next: return 2
+      case .previous: return 3
+      case .UNRECOGNIZED(let i): return i
+      }
+    }
+
+    // The compiler won't synthesize support with the UNRECOGNIZED case.
+    static let allCases: [BridgProtoMediaCommand.Action] = [
+      .unspecified,
+      .playPause,
+      .next,
+      .previous,
+    ]
+
+  }
+
+  init() {}
+}
+
 nonisolated struct BridgProtoSessionLock: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -881,7 +1009,7 @@ fileprivate nonisolated let _protobuf_package = "bridg"
 
 nonisolated extension BridgProtoEnvelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".Envelope"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{4}\u{9}pair_request\0\u{3}pair_response\0\u{3}pair_resume\0\u{3}pair_resume_ack\0\u{4}\u{7}file_start\0\u{3}file_chunk\0\u{3}file_ack\0\u{3}file_cancel\0\u{2}\u{7}clipboard\0\u{2}\u{a}notification\0\u{3}notif_action\0\u{3}notif_dismiss\0\u{4}\u{8}input_event\0\u{4}\u{2}call_control\0\u{4}\u{8}video_frame\0\u{3}video_stream_start\0\u{3}video_stream_stop\0\u{2}&ping\0\u{1}pong\0\u{4}\u{9}session_lock\0\u{3}session_lock_release\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{4}\u{9}pair_request\0\u{3}pair_response\0\u{3}pair_resume\0\u{3}pair_resume_ack\0\u{4}\u{7}file_start\0\u{3}file_chunk\0\u{3}file_ack\0\u{3}file_cancel\0\u{2}\u{7}clipboard\0\u{2}\u{a}notification\0\u{3}notif_action\0\u{3}notif_dismiss\0\u{4}\u{8}input_event\0\u{4}\u{2}call_control\0\u{4}\u{8}video_frame\0\u{3}video_stream_start\0\u{3}video_stream_stop\0\u{3}audio_frame\0\u{4}\u{7}media_state\0\u{3}media_command\0\u{2}\u{1d}ping\0\u{1}pong\0\u{4}\u{9}session_lock\0\u{3}session_lock_release\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1111,6 +1239,45 @@ nonisolated extension BridgProtoEnvelope: SwiftProtobuf.Message, SwiftProtobuf._
           self.payload = .videoStreamStop(v)
         }
       }()
+      case 63: try {
+        var v: BridgProtoAudioFrame?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .audioFrame(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .audioFrame(v)
+        }
+      }()
+      case 70: try {
+        var v: BridgProtoMediaState?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .mediaState(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .mediaState(v)
+        }
+      }()
+      case 71: try {
+        var v: BridgProtoMediaCommand?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .mediaCommand(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .mediaCommand(v)
+        }
+      }()
       case 100: try {
         var v: BridgProtoPing?
         var hadOneofValue = false
@@ -1244,6 +1411,18 @@ nonisolated extension BridgProtoEnvelope: SwiftProtobuf.Message, SwiftProtobuf._
     case .videoStreamStop?: try {
       guard case .videoStreamStop(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 62)
+    }()
+    case .audioFrame?: try {
+      guard case .audioFrame(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 63)
+    }()
+    case .mediaState?: try {
+      guard case .mediaState(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 70)
+    }()
+    case .mediaCommand?: try {
+      guard case .mediaCommand(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 71)
     }()
     case .ping?: try {
       guard case .ping(let v)? = self.payload else { preconditionFailure() }
@@ -2064,6 +2243,135 @@ nonisolated extension BridgProtoVideoStreamStop: SwiftProtobuf.Message, SwiftPro
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
+}
+
+nonisolated extension BridgProtoAudioFrame: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".AudioFrame"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}pcm\0\u{3}sample_rate\0\u{1}channels\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.pcm) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.sampleRate) }()
+      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.channels) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.pcm.isEmpty {
+      try visitor.visitSingularBytesField(value: self.pcm, fieldNumber: 1)
+    }
+    if self.sampleRate != 0 {
+      try visitor.visitSingularUInt32Field(value: self.sampleRate, fieldNumber: 2)
+    }
+    if self.channels != 0 {
+      try visitor.visitSingularUInt32Field(value: self.channels, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: BridgProtoAudioFrame, rhs: BridgProtoAudioFrame) -> Bool {
+    if lhs.pcm != rhs.pcm {return false}
+    if lhs.sampleRate != rhs.sampleRate {return false}
+    if lhs.channels != rhs.channels {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension BridgProtoMediaState: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".MediaState"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}package_name\0\u{3}app_label\0\u{1}title\0\u{1}artist\0\u{1}playing\0\u{1}active\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.packageName) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.appLabel) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.title) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.artist) }()
+      case 5: try { try decoder.decodeSingularBoolField(value: &self.playing) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.active) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.packageName.isEmpty {
+      try visitor.visitSingularStringField(value: self.packageName, fieldNumber: 1)
+    }
+    if !self.appLabel.isEmpty {
+      try visitor.visitSingularStringField(value: self.appLabel, fieldNumber: 2)
+    }
+    if !self.title.isEmpty {
+      try visitor.visitSingularStringField(value: self.title, fieldNumber: 3)
+    }
+    if !self.artist.isEmpty {
+      try visitor.visitSingularStringField(value: self.artist, fieldNumber: 4)
+    }
+    if self.playing != false {
+      try visitor.visitSingularBoolField(value: self.playing, fieldNumber: 5)
+    }
+    if self.active != false {
+      try visitor.visitSingularBoolField(value: self.active, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: BridgProtoMediaState, rhs: BridgProtoMediaState) -> Bool {
+    if lhs.packageName != rhs.packageName {return false}
+    if lhs.appLabel != rhs.appLabel {return false}
+    if lhs.title != rhs.title {return false}
+    if lhs.artist != rhs.artist {return false}
+    if lhs.playing != rhs.playing {return false}
+    if lhs.active != rhs.active {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension BridgProtoMediaCommand: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".MediaCommand"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}action\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularEnumField(value: &self.action) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.action != .unspecified {
+      try visitor.visitSingularEnumField(value: self.action, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: BridgProtoMediaCommand, rhs: BridgProtoMediaCommand) -> Bool {
+    if lhs.action != rhs.action {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension BridgProtoMediaCommand.Action: SwiftProtobuf._ProtoNameProviding {
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0ACTION_UNSPECIFIED\0\u{1}PLAY_PAUSE\0\u{1}NEXT\0\u{1}PREVIOUS\0")
 }
 
 nonisolated extension BridgProtoSessionLock: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {

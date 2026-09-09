@@ -14,10 +14,12 @@ import android.util.Base64
 import android.util.Log
 import com.bridg.BridgApplication
 import com.bridg.R
+import com.bridg.capture.AudioCapture
 import com.bridg.capture.ScreenCapture
 import com.bridg.clipboard.BridgClipboardManager
 import com.bridg.files.FileTransferManager
 import com.bridg.notify.BridgNotificationListenerService
+import com.bridg.media.MediaControl
 import com.bridg.pairing.KeyManager
 import com.bridg.pairing.PairingManager
 import com.bridg.proto.*
@@ -44,6 +46,8 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
     private lateinit var serviceDiscovery: ServiceDiscovery
 
     private lateinit var screenCapture: ScreenCapture
+    private lateinit var audioCapture: AudioCapture
+    private lateinit var mediaControl: MediaControl
     private lateinit var clipboardManager: BridgClipboardManager
     private lateinit var fileTransferManager: FileTransferManager
 
@@ -53,6 +57,9 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
     /** Set by PairingActivity after a successful QR scan; consumed on next connect. */
     @Volatile private var pendingPairing: PairingManager.QRData? = null
     @Volatile private var connected = false
+
+    /** Last reported send percentage, so progress doesn't respam the notification. */
+    @Volatile private var lastSendPercent = -1
 
     private var telephonyCallback: Any? = null
     @Volatile private var callRinging = false
@@ -71,6 +78,8 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
         bridgSocket = BridgSocket()
         serviceDiscovery = ServiceDiscovery(this)
         screenCapture = ScreenCapture(this)
+        audioCapture = AudioCapture()
+        mediaControl = MediaControl(this)
         clipboardManager = BridgClipboardManager(this)
         fileTransferManager = FileTransferManager(this)
 
@@ -81,6 +90,39 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
         // blocking path so a fast disk read can't outrun the socket and get
         // chunks dropped — that was the "file transfer works sometimes" bug.
         fileTransferManager.setEnvelopeSender { envelope -> bridgSocket.sendBlocking(envelope) }
+
+        // Nothing ever set a listener, so every transfer outcome — finished,
+        // failed, rejected by the Mac — went nowhere and the status line sat on
+        // "Sending …" forever, even for transfers that had completed fine.
+        fileTransferManager.setTransferListener(object : FileTransferManager.TransferListener {
+            override fun onTransferStarted(transferId: String, filename: String, totalSize: Long) {
+                updateStatus("Receiving $filename…")
+            }
+
+            override fun onChunkSent(transferId: String, offset: Long, totalSize: Long) {
+                // Fires per 64 KB chunk; rebuilding the notification that often
+                // is pure churn, so only speak up when the number changes.
+                val percent = if (totalSize > 0) (offset * 100 / totalSize).toInt() else 0
+                if (percent == lastSendPercent) return
+                lastSendPercent = percent
+                updateStatus("Sending… $percent%")
+            }
+
+            override fun onTransferCompleted(transferId: String) {
+                lastSendPercent = -1
+                updateStatus(if (connected) "Connected to Mac" else "Transfer complete")
+            }
+
+            override fun onTransferError(transferId: String, error: String) {
+                lastSendPercent = -1
+                updateStatus("Transfer failed: $error")
+            }
+
+            override fun onTransferCancelled(transferId: String, reason: String) {
+                lastSendPercent = -1
+                updateStatus("Transfer cancelled")
+            }
+        })
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -158,6 +200,8 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
         isServiceRunning = false
 
         screenCapture.stopCapture()
+        audioCapture.stop()
+        mediaControl.stop()
         clipboardManager.stopMonitoring()
         stopCallStateMonitoring()
         serviceDiscovery.stopDiscovery()
@@ -287,6 +331,13 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
                 }
             }
         )
+        // Media sessions need the same notification-listener grant, so this is
+        // the first moment they can be read.
+        mediaControl.stop()
+        mediaControl.start { state ->
+            bridgSocket.send(Envelope.newBuilder().setMediaState(state).build())
+        }
+
         // A call notification posts once. If it landed while the link was down,
         // re-send whatever calls are still ringing now that we're back.
         BridgNotificationListenerService.instance?.forwardActiveCalls()
@@ -391,9 +442,13 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
      */
     private fun startScreenCapture(consent: Intent) {
         // Consent is in hand, so the mediaProjection type is now legal to claim.
+        // MICROPHONE is for the playback capture that rides along with the
+        // video — Android 14 treats any AudioRecord as microphone use and kills
+        // a service that records without declaring it.
         startForegroundWithTypes(
             ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
         )
 
         val manager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -449,8 +504,23 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
                     }
                 }
             })
+
+            // Same projection, so the Mac hears what it sees. Best-effort:
+            // a device or app that refuses playback capture just stays silent.
+            audioCapture.start(projection) { pcm, sampleRate, channels ->
+                bridgSocket.send(
+                    Envelope.newBuilder().setAudioFrame(
+                        AudioFrame.newBuilder()
+                            .setPcm(com.google.protobuf.ByteString.copyFrom(pcm))
+                            .setSampleRate(sampleRate)
+                            .setChannels(channels)
+                            .build()
+                    ).build()
+                )
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start screen capture: ${e.message}")
+            audioCapture.stop()
             this.mediaProjection = null
             startForegroundWithTypes(ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
             updateStatus("Screen mirroring unavailable on this device")
@@ -635,6 +705,13 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
             }
 
             Envelope.PayloadCase.CALL_CONTROL -> handleCallControl(envelope.callControl.action)
+
+            // The Mac deleting a notification clears it on the phone too.
+            Envelope.PayloadCase.NOTIF_DISMISS -> {
+                BridgNotificationListenerService.instance?.dismissFromRemote(envelope.notifDismiss.id)
+            }
+
+            Envelope.PayloadCase.MEDIA_COMMAND -> mediaControl.handleCommand(envelope.mediaCommand.action)
 
             Envelope.PayloadCase.PING -> {
                 bridgSocket.send(

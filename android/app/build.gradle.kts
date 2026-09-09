@@ -1,3 +1,4 @@
+import com.google.protobuf.gradle.proto
 import java.util.Properties
 
 plugins {
@@ -20,8 +21,8 @@ android {
         applicationId = "com.bridg"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -59,6 +60,16 @@ android {
 
     buildFeatures {
         viewBinding = true
+    }
+
+    sourceSets {
+        getByName("main") {
+            // Build straight from the shared schema. This module used to keep
+            // its own copy under src/main/proto, so the two halves of the app
+            // could silently drift apart — an edit to proto/bridg.proto reached
+            // the Mac and not the phone.
+            proto { srcDir("../../proto") }
+        }
     }
 }
 

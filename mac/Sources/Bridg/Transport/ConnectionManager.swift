@@ -254,7 +254,7 @@ final class ConnectionManager {
             // Decode on this queue rather than shipping the frame to the main
             // actor first — that hop is what the mirror's latency was made of.
             switch envelope.payload {
-            case .videoFrame, .videoStreamStart, .videoStreamStop:
+            case .videoFrame, .videoStreamStart, .videoStreamStop, .audioFrame:
                 onVideoMessage?(envelope)
             default:
                 onMessage?(envelope)

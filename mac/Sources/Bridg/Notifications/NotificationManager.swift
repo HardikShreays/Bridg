@@ -20,6 +20,10 @@ class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     /// Answer / reject a ringing phone call from the Mac. Set by AppState.
     var onCallAction: ((BridgProtoCallControl.Action) -> Void)?
 
+    /// The user cleared a banner here; the phone should clear it too.
+    /// Set by AppState.
+    var onDismiss: ((String) -> Void)?
+
     override init() {
         super.init()
         notificationCenter.delegate = self
@@ -62,7 +66,7 @@ class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                 identifier: Self.callCategoryId,
                 actions: [answerAction, declineAction],
                 intentIdentifiers: [],
-                options: []
+                options: .customDismissAction
             )
         ])
     }
@@ -163,6 +167,8 @@ class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         case Self.declineActionId:
             onCallAction?(.reject)
             dismissNotification(id: identifier)
+        case UNNotificationDismissActionIdentifier:
+            onDismiss?(identifier)
         default:
             break
         }
