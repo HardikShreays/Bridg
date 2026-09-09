@@ -46,7 +46,9 @@ PLIST
 # Sign with a real identity if one exists — macOS denies notifications outright
 # to ad-hoc-signed apps ("Notifications are not allowed for this application").
 # Falls back to ad-hoc, which is enough for Local Network but not notifications.
-IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | grep -oE '"Apple Development: [^"]+"' | head -1 | tr -d '"')"
+# `|| true` — no matching identity makes grep exit 1, which under `set -eo
+# pipefail` would kill the script (e.g. on a CI runner with no signing certs).
+IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | grep -oE '"Apple Development: [^"]+"' | head -1 | tr -d '"' || true)"
 codesign --force --deep --sign "${IDENTITY:--}" "$APP" 2>/dev/null \
     || echo "warning: codesign failed (app may not get network/notification permission)"
 echo "signed with: ${IDENTITY:-ad-hoc}"
