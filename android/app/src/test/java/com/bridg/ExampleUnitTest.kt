@@ -4,6 +4,10 @@ import com.bridg.notify.BridgNotificationListenerService
 import com.bridg.notify.BridgNotificationListenerService.Seen
 import com.bridg.pairing.SessionKdf
 import com.bridg.proto.DeviceStatus
+import com.bridg.proto.Envelope
+import com.bridg.proto.PairResume
+import com.bridg.transport.FrameCodec
+import java.io.DataInputStream
 import com.bridg.remote.RemoteActionHandler
 import com.bridg.status.BatteryMonitor
 import com.bridg.transport.BridgSocket
@@ -205,6 +209,33 @@ class BridgSocketTest {
 
             assertEquals(listOf(false, true), results.sorted())
             assertEquals(1, accepted.get())
+            socket.disconnect()
+        }
+    }
+
+    /**
+     * Before the Mac's half of the salt arrives there is no session key, so an
+     * update queued at connect time went out in plaintext and the Mac, already
+     * expecting sealed frames, dropped the link. Only the handshake may precede
+     * encryption.
+     */
+    @Test
+    fun onlyTheHandshakeGoesOutBeforeEncryption() {
+        ServerSocket(0).use { server ->
+            val socket = BridgSocket()
+            runBlocking { socket.connect("127.0.0.1", server.localPort) }
+            server.accept().use { peer ->
+                peer.soTimeout = 2_000
+                socket.send(
+                    Envelope.newBuilder()
+                        .setDeviceStatus(DeviceStatus.newBuilder().setBatteryPercent(50).build())
+                        .build()
+                )
+                socket.send(Envelope.newBuilder().setPairResume(PairResume.getDefaultInstance()).build())
+
+                val first = FrameCodec.readFrame(DataInputStream(peer.getInputStream()))
+                assertEquals(Envelope.PayloadCase.PAIR_RESUME, Envelope.parseFrom(first!!).payloadCase)
+            }
             socket.disconnect()
         }
     }

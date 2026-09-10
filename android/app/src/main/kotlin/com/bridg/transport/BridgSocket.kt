@@ -167,6 +167,20 @@ class BridgSocket {
                 if (outgoing.envelope.hasVideoFrame()) queueDepth.decrementAndGet()
                 val out = output ?: break
                 val envelope = outgoing.envelope
+
+                // Until the handshake yields a session key, only the handshake
+                // itself may go out. Anything else was written in plaintext —
+                // notification text and clipboard on the open network — and the
+                // Mac, already expecting sealed frames, dropped the link on
+                // "Rejected frame" a second after every connect.
+                // ponytail: dropped, not held — an update queued in the handshake
+                // window is lost. Buffer and flush from setEncryptionKey if one
+                // turns out to matter.
+                if (encryptedTransport == null && !envelope.isHandshake()) {
+                    Log.w(TAG, "Not authenticated yet — dropping ${envelope.payloadCase}")
+                    continue
+                }
+
                 try {
                     var bytes = envelope.toByteArray()
                     val transport = encryptedTransport
@@ -232,6 +246,9 @@ class BridgSocket {
         runCatching { s.close() }
         connectionListener?.onConnectionLost(e)
     }
+
+    private fun Envelope.isHandshake() =
+        payloadCase == Envelope.PayloadCase.PAIR_REQUEST || payloadCase == Envelope.PayloadCase.PAIR_RESUME
 
     interface ConnectionListener {
         fun onConnected()

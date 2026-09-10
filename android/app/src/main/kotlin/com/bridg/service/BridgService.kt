@@ -700,6 +700,9 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
                 pendingPairing = null
                 bridgSocket.setEncryptionKey(sessionKey)
                 batteryMonitor.resend()
+                // The listener may have bound after the service started; this
+                // also re-sends ringing calls and media state, now sealed.
+                startNotificationForwarding()
                 updateStatus("Paired with ${envelope.pairResponse.deviceName}")
             }
 
@@ -714,6 +717,9 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
                 val sessionKey = sessionKeyFor(peerKey, envelope.pairResumeAck.sessionSalt) ?: return
                 bridgSocket.setEncryptionKey(sessionKey)
                 batteryMonitor.resend()
+                // The listener may have bound after the service started; this
+                // also re-sends ringing calls and media state, now sealed.
+                startNotificationForwarding()
                 updateStatus("Connected to Mac")
             }
 
@@ -835,8 +841,9 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
         connected = true
         updateStatus("Connected — handshaking…")
         startHandshake()
-        // The listener may have bound after the service started.
-        startNotificationForwarding()
+        // Notification forwarding (and its catch-up sends) starts once the
+        // session key is set — see PAIR_RESPONSE / PAIR_RESUME_ACK. Anything sent
+        // before that is dropped by BridgSocket rather than leaked in plaintext.
     }
 
     override fun onDisconnected() {
