@@ -14,6 +14,9 @@ struct BridgApp: App {
             BridgMenuBarView()
                 .environmentObject(appState)
         }
+        // The default .menu style renders buttons as menu items and silently
+        // drops everything else — the dial field never appeared.
+        .menuBarExtraStyle(.window)
 
         // Main window (accessible from menu bar)
         Window("Bridg", id: "main") {

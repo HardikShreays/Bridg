@@ -147,6 +147,17 @@ struct HomeDetailView: View {
                 .controlSize(.large)
             }
 
+            // Dialling works over Bluetooth even when the Wi-Fi link is down, so
+            // the actions show whenever a phone is paired, not only when connected.
+            if appState.pairedDeviceName != nil {
+                PhoneActionsView()
+                    .environmentObject(appState)
+                    .padding(12)
+                    .frame(maxWidth: 520, alignment: .leading)
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .cornerRadius(12)
+            }
+
             Spacer()
         }
         .padding(40)
@@ -445,5 +456,56 @@ struct NowPlayingView: View {
             .background(Color(nsColor: .controlBackgroundColor))
             .cornerRadius(12)
         }
+    }
+}
+
+/// Phone actions shared by the menu bar popover and the main window: open the
+/// copied link on the phone, ring it (and stop), and dial.
+struct PhoneActionsView: View {
+    @EnvironmentObject var appState: AppState
+
+    /// http(s) link currently on the Mac clipboard, refreshed when the view
+    /// appears. NSPasteboard is not observable, and polling it on a timer to
+    /// keep one button enabled is not worth the wakeups.
+    @State private var copiedLink: String?
+    @State private var dialNumber = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // The link you want on your phone is nearly always the one you just
+            // copied, so read the pasteboard rather than asking for a text field.
+            Button(action: { appState.openOnPhone(url: copiedLink ?? "") }) {
+                Label("Open Copied Link on Phone", systemImage: "safari")
+            }
+            .disabled(!appState.connectionState.isConnected || copiedLink == nil)
+            .help(copiedLink ?? "Copy an http(s) link first")
+
+            Button(action: { appState.ringPhone(!appState.isRinging) }) {
+                Label(
+                    appState.isRinging ? "Stop Ringing" : "Ring Phone",
+                    systemImage: appState.isRinging ? "bell.slash" : "bell.and.waves.left.and.right"
+                )
+            }
+            .disabled(!appState.connectionState.isConnected)
+
+            // Dialling rides Bluetooth, not the Wi-Fi link, so it is not gated on
+            // the connection state like the actions above.
+            HStack {
+                TextField("Call a number", text: $dialNumber)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { appState.dial(dialNumber) }
+                Button(action: { appState.dial(dialNumber) }) {
+                    Image(systemName: "phone.fill")
+                }
+                .disabled(PhoneDialer.dialable(dialNumber).isEmpty)
+                .help("Place the call on your phone over Bluetooth")
+            }
+            if let status = appState.dialStatus {
+                Text(status)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .onAppear { copiedLink = AppState.urlOnPasteboard() }
     }
 }

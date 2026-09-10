@@ -25,8 +25,10 @@ final class AppState: ObservableObject {
 
     /// Phone battery, as last reported. Nil until the phone says.
     @Published var phoneBattery: BatteryState?
-    /// Outcome of the last click-to-call, shown under the menu bar dial field.
+    /// Outcome of the last click-to-call, shown under the dial field.
     @Published var dialStatus: String?
+    /// True from Ring Phone until Stop Ringing or the phone's own cutoff.
+    @Published var isRinging = false
     @Published var activeTransfers: [TransferInfo] = []
     /// Set on any failed transfer so `FileTransferView` can show it, instead
     /// of the transfer just silently disappearing from the list.
@@ -206,13 +208,29 @@ final class AppState: ObservableObject {
         pasteboard.setString(string, forType: .string)
     }
 
-    /// Ring the phone at full volume so you can find it.
+    /// Clears `isRinging` when the phone stops by itself.
+    ///
+    /// ponytail: the phone never reports its ringing state, so this mirrors its
+    /// 30 s cutoff (RemoteActionHandler.RING_TIMEOUT_MS). If the two drift, have
+    /// the phone send ring state instead.
+    private var ringReset: Task<Void, Never>?
+
+    /// Ring the phone at full volume so you can find it, or stop it.
     func ringPhone(_ ring: Bool = true) {
         var action = BridgProtoRemoteAction()
         action.action = ring ? .ring : .stopRing
         var envelope = BridgProtoEnvelope()
         envelope.remoteAction = action
         connectionManager.send(envelope)
+
+        isRinging = ring
+        ringReset?.cancel()
+        guard ring else { return }
+        ringReset = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 30_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.isRinging = false
+        }
     }
 
     /// Push a link to the phone. Returns false if the string is not one we
