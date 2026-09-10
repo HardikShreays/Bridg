@@ -32,6 +32,9 @@ class BridgSocket {
     private var receiveJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
+    /** Set while a [connect] is dialling, so a racing second call backs off. */
+    private val connecting = java.util.concurrent.atomic.AtomicBoolean(false)
+
     /**
      * Turn on encryption once the handshake has produced a session key.
      * Everything sent and received after this point is sealed.
@@ -44,8 +47,20 @@ class BridgSocket {
         encryptedTransport = null
     }
 
+    /**
+     * Dial the Mac. Returns false without dialling if another attempt is in
+     * flight or the link is already up.
+     *
+     * Known-host dialling and Bonjour discovery both call this, often within
+     * milliseconds. Letting both through opened two sockets that overwrote each
+     * other's streams, each sent its own handshake, and the Mac cancelled the
+     * first mid-handshake — so the link never authenticated and cycled through
+     * "Broken pipe" forever.
+     */
     suspend fun connect(host: String, port: Int): Boolean = withContext(Dispatchers.IO) {
+        if (!connecting.compareAndSet(false, true)) return@withContext false
         try {
+            if (isConnected()) return@withContext false
             val s = Socket().apply {
                 tcpNoDelay = true
                 // Must exceed the Mac's 10s ping interval (or an idle but healthy
@@ -59,8 +74,8 @@ class BridgSocket {
             input = DataInputStream(BufferedInputStream(s.getInputStream()))
             output = DataOutputStream(BufferedOutputStream(s.getOutputStream()))
 
-            startSendLoop()
-            startReceiveLoop()
+            startSendLoop(s)
+            startReceiveLoop(s)
 
             connectionListener?.onConnected()
             Log.i(TAG, "Connected to $host:$port")
@@ -69,6 +84,8 @@ class BridgSocket {
             Log.e(TAG, "Connection failed: ${e.message}")
             connectionListener?.onConnectionFailed(e)
             false
+        } finally {
+            connecting.set(false)
         }
     }
 
@@ -140,7 +157,7 @@ class BridgSocket {
 
     fun isConnected(): Boolean = socket?.let { it.isConnected && !it.isClosed } == true
 
-    private fun startSendLoop() {
+    private fun startSendLoop(s: Socket) {
         sendJob?.cancel()
         sendJob = scope.launch {
             // A channel blocks until there is work; the old loop polled a queue
@@ -162,14 +179,14 @@ class BridgSocket {
                     FrameCodec.writeFrame(out, bytes)
                 } catch (e: IOException) {
                     Log.e(TAG, "Send error: ${e.message}")
-                    connectionListener?.onConnectionLost(e)
+                    lost(s, e)
                     break
                 }
             }
         }
     }
 
-    private fun startReceiveLoop() {
+    private fun startReceiveLoop(s: Socket) {
         receiveJob?.cancel()
         receiveJob = scope.launch {
             while (isActive) {
@@ -182,19 +199,38 @@ class BridgSocket {
                         // key mismatch. None of those get better by reading the
                         // next frame, so drop the link instead of looping.
                         Log.e(TAG, "Rejected frame — dropping connection")
-                        connectionListener?.onConnectionLost(IOException("frame rejected"))
+                        lost(s, IOException("frame rejected"))
                         break
                     }
                     receiveListener?.invoke(Envelope.parseFrom(bytes))
                 } catch (e: IOException) {
                     if (isActive) {
                         Log.e(TAG, "Receive error: ${e.message}")
-                        connectionListener?.onConnectionLost(e)
+                        lost(s, e)
                     }
                     break
                 }
             }
         }
+    }
+
+    /**
+     * Close the socket a loop was serving, then report the loss once.
+     *
+     * The socket used to stay open after a loss, so [isConnected] kept saying
+     * true and [connect] would refuse every reconnect. The identity check keeps
+     * the second loop of a dead link — or a loop outliving its socket — from
+     * reporting again or closing a newer connection.
+     */
+    private fun lost(s: Socket, e: Exception) {
+        synchronized(this) {
+            if (s !== socket) return
+            socket = null
+            input = null
+            output = null
+        }
+        runCatching { s.close() }
+        connectionListener?.onConnectionLost(e)
     }
 
     interface ConnectionListener {

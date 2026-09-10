@@ -62,6 +62,12 @@ android {
         viewBinding = true
     }
 
+    // BridgSocket logs through android.util.Log; on the JVM those stubs throw
+    // unless told to return defaults, which would fail its connect test.
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
+
     sourceSets {
         getByName("main") {
             // Build straight from the shared schema. This module used to keep

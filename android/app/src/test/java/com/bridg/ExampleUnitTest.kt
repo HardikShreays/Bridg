@@ -6,6 +6,13 @@ import com.bridg.pairing.SessionKdf
 import com.bridg.proto.DeviceStatus
 import com.bridg.remote.RemoteActionHandler
 import com.bridg.status.BatteryMonitor
+import com.bridg.transport.BridgSocket
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.runBlocking
+import java.net.ServerSocket
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -171,5 +178,34 @@ class RemoteUrlTest {
         assertFalse(RemoteActionHandler.isAllowedUrl("https://"))
         assertFalse(RemoteActionHandler.isAllowedUrl(""))
         assertFalse(RemoteActionHandler.isAllowedUrl("not a url at all"))
+    }
+}
+
+class BridgSocketTest {
+
+    /**
+     * Known-host dialling and Bonjour discovery race to connect. When both got
+     * through, the second socket overwrote the first one's streams and the Mac
+     * cancelled the first mid-handshake, so the link never authenticated and
+     * reconnected forever. Exactly one attempt may win.
+     */
+    @Test
+    fun concurrentConnectsOpenOneSocket() {
+        ServerSocket(0).use { server ->
+            val accepted = AtomicInteger()
+            Thread {
+                runCatching { while (true) { server.accept(); accepted.incrementAndGet() } }
+            }.apply { isDaemon = true; start() }
+
+            val socket = BridgSocket()
+            val results = runBlocking {
+                (1..2).map { async(Dispatchers.IO) { socket.connect("127.0.0.1", server.localPort) } }.awaitAll()
+            }
+            Thread.sleep(200)
+
+            assertEquals(listOf(false, true), results.sorted())
+            assertEquals(1, accepted.get())
+            socket.disconnect()
+        }
     }
 }
