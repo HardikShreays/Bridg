@@ -22,6 +22,9 @@ final class AppState: ObservableObject {
     @Published var notificationHistory: [NotificationItem] = []
     /// What the phone is playing right now, or nil when nothing is.
     @Published var nowPlaying: MediaItem?
+
+    /// Phone battery, as last reported. Nil until the phone says.
+    @Published var phoneBattery: BatteryState?
     @Published var activeTransfers: [TransferInfo] = []
     /// Set on any failed transfer so `FileTransferView` can show it, instead
     /// of the transfer just silently disappearing from the list.
@@ -200,6 +203,50 @@ final class AppState: ObservableObject {
         pasteboard.setString(string, forType: .string)
     }
 
+    /// Ring the phone at full volume so you can find it.
+    func ringPhone(_ ring: Bool = true) {
+        var action = BridgProtoRemoteAction()
+        action.action = ring ? .ring : .stopRing
+        var envelope = BridgProtoEnvelope()
+        envelope.remoteAction = action
+        connectionManager.send(envelope)
+    }
+
+    /// Push a link to the phone. Returns false if the string is not one we
+    /// will send — the phone refuses anything but http(s) anyway, so failing
+    /// here lets the UI stay honest instead of silently dropping it.
+    @discardableResult
+    func openOnPhone(url: String) -> Bool {
+        guard Self.isSendableURL(url) else { return false }
+
+        var action = BridgProtoRemoteAction()
+        action.action = .openURL
+        action.url = url
+        var envelope = BridgProtoEnvelope()
+        envelope.remoteAction = action
+        connectionManager.send(envelope)
+        return true
+    }
+
+    /// The http(s) URL currently on the Mac clipboard, if there is one.
+    static func urlOnPasteboard() -> String? {
+        guard let string = NSPasteboard.general.string(forType: .string)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        return isSendableURL(string) ? string : nil
+    }
+
+    /// Must agree with RemoteActionHandler.isAllowedUrl on the phone.
+    ///
+    /// Pure string validation, so it is deliberately off the main actor — that
+    /// is what lets the test suite call it directly.
+    nonisolated static func isSendableURL(_ raw: String) -> Bool {
+        guard let components = URLComponents(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = components.host, !host.isEmpty else { return false }
+        return true
+    }
+
     /// Answer / hang up / mute / speaker on the phone's current call.
     /// The incoming call itself surfaces as a normal forwarded notification.
     func sendCallControl(_ action: BridgProtoCallControl.Action) {
@@ -300,8 +347,9 @@ final class AppState: ObservableObject {
         clipboardSync.startMonitoring()
 
         // The file manager pushes chunks itself; it just needed a way out.
-        fileTransferManager.onSendEnvelope = { [weak self] envelope in
-            self?.connectionManager.send(envelope)
+        fileTransferManager.onSendEnvelope = { [weak self] envelope, sent in
+            guard let self else { return sent?(false) ?? () }
+            self.connectionManager.send(envelope, sent: sent)
         }
         fileTransferManager.onTransferStarted = { [weak self] id, filename, size, isOutgoing in
             Task { @MainActor in
@@ -380,6 +428,13 @@ final class AppState: ObservableObject {
             notificationManager.dismissNotification(id: dismiss.id)
             notificationHistory.removeAll { $0.id == dismiss.id }
 
+        case .deviceStatus(let status):
+            phoneBattery = BatteryState(
+                percent: Int(status.batteryPercent),
+                isCharging: status.charging,
+                isLow: status.batteryLow
+            )
+
         case .mediaState(let state):
             nowPlaying = state.active
                 ? MediaItem(
@@ -434,6 +489,24 @@ struct NotificationItem: Identifiable {
     let timestamp: Date
     let hasReplyAction: Bool
     let isCall: Bool
+}
+
+struct BatteryState: Equatable {
+    let percent: Int
+    let isCharging: Bool
+    let isLow: Bool
+
+    /// SF Symbols has a battery glyph per quarter, plus a charging variant.
+    var symbolName: String {
+        if isCharging { return "battery.100.bolt" }
+        switch percent {
+        case ..<13: return "battery.0"
+        case ..<38: return "battery.25"
+        case ..<63: return "battery.50"
+        case ..<88: return "battery.75"
+        default: return "battery.100"
+        }
+    }
 }
 
 struct MediaItem: Equatable {

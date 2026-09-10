@@ -6,7 +6,12 @@ import CryptoKit
 /// Supports sending files (drag-and-drop onto app) and receiving files.
 class FileTransferManager {
     private let downloadDirectory: URL
+
+    /// Touched from the network queue (incoming chunks and acks) and from the
+    /// sender thread, so every access goes through the accessors below. A Swift
+    /// Dictionary read concurrently with a write is a crash, not a stale read.
     private var activeTransfers: [String: TransferState] = [:]
+    private let transfersLock = NSLock()
 
     /// id, filename, size, isOutgoing (true = we are sending it to the phone).
     var onTransferStarted: ((String, String, Int64, Bool) -> Void)?
@@ -15,7 +20,9 @@ class FileTransferManager {
     var onTransferError: ((String, String) -> Void)?
 
     /// Set by AppState. Without it the manager computed chunks and threw them away.
-    var onSendEnvelope: ((BridgProtoEnvelope) -> Void)?
+    /// The completion fires once the socket has taken the frame — that is what
+    /// paces `sendChunks`.
+    var onSendEnvelope: ((BridgProtoEnvelope, ((Bool) -> Void)?) -> Void)?
 
     init() {
         downloadDirectory = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
@@ -50,13 +57,13 @@ class FileTransferManager {
             url: url,
             expectedChecksum: checksum
         )
-        activeTransfers[transferId] = state
+        addTransfer(state)
 
         onTransferStarted?(transferId, filename, fileSize, true)
 
         var envelope = BridgProtoEnvelope()
         envelope.fileStart = startMsg
-        onSendEnvelope?(envelope)
+        onSendEnvelope?(envelope, nil)
 
         sendChunks(state: state)
     }
@@ -65,15 +72,15 @@ class FileTransferManager {
     func handleAck(_ ack: BridgProtoFileTransferAck) {
         let transferId = ack.transferID
 
-        guard let state = activeTransfers[transferId] else { return }
+        guard let state = transfer(transferId) else { return }
 
         if ack.complete {
-            activeTransfers.removeValue(forKey: transferId)
+            removeTransfer(transferId)
             onTransferCompleted?(transferId, state.url)
         } else if !ack.error.isEmpty {
             // Only an error triggers a resend; a plain progress ack is not a
             // request to restart the stream from that offset.
-            activeTransfers.removeValue(forKey: transferId)
+            removeTransfer(transferId)
             onTransferError?(transferId, ack.error)
         } else {
             onTransferProgress?(transferId, Int64(ack.bytesReceived), state.totalSize)
@@ -95,7 +102,7 @@ class FileTransferManager {
             url: targetURL,
             expectedChecksum: start.checksum
         )
-        activeTransfers[transferId] = state
+        addTransfer(state)
 
         // FileHandle(forWritingTo:) throws unless the file already exists.
         FileManager.default.createFile(atPath: targetURL.path, contents: nil)
@@ -108,7 +115,7 @@ class FileTransferManager {
         var ack = BridgProtoFileTransferAck()
         ack.transferID = chunk.transferID
 
-        guard let state = activeTransfers[chunk.transferID] else {
+        guard let state = transfer(chunk.transferID) else {
             ack.error = "Unknown transfer"
             return ack
         }
@@ -118,7 +125,7 @@ class FileTransferManager {
         // loudly instead of seeking past the gap and writing a corrupt file
         // that reports success.
         guard Int64(chunk.offset) == state.bytesTransferred else {
-            activeTransfers.removeValue(forKey: chunk.transferID)
+            removeTransfer(chunk.transferID)
             try? FileManager.default.removeItem(at: state.url)
             ack.error = "Out-of-order chunk (expected \(state.bytesTransferred), got \(chunk.offset))"
             onTransferError?(chunk.transferID, ack.error)
@@ -132,7 +139,7 @@ class FileTransferManager {
             fileHandle.closeFile()
 
             let bytesReceived = Int64(chunk.offset) + Int64(chunk.data.count)
-            activeTransfers[chunk.transferID]?.bytesTransferred = bytesReceived
+            recordBytes(bytesReceived, for: chunk.transferID)
             ack.bytesReceived = UInt64(bytesReceived)
 
             if bytesReceived >= state.totalSize {
@@ -145,7 +152,7 @@ class FileTransferManager {
                     onTransferError?(chunk.transferID, "Checksum mismatch")
                 } else {
                     ack.complete = true
-                    activeTransfers.removeValue(forKey: chunk.transferID)
+                    removeTransfer(chunk.transferID)
                     onTransferCompleted?(chunk.transferID, state.url)
                 }
             } else {
@@ -170,19 +177,53 @@ class FileTransferManager {
 
     // MARK: - Private
 
+    private func transfer(_ id: String) -> TransferState? {
+        transfersLock.lock(); defer { transfersLock.unlock() }
+        return activeTransfers[id]
+    }
+
+    private func addTransfer(_ state: TransferState) {
+        transfersLock.lock(); defer { transfersLock.unlock() }
+        activeTransfers[state.id] = state
+    }
+
+    private func removeTransfer(_ id: String) {
+        transfersLock.lock(); defer { transfersLock.unlock() }
+        activeTransfers.removeValue(forKey: id)
+    }
+
+    private func recordBytes(_ bytes: Int64, for id: String) {
+        transfersLock.lock(); defer { transfersLock.unlock() }
+        activeTransfers[id]?.bytesTransferred = bytes
+    }
+
+    /// Stream the file out, one chunk at a time.
+    ///
+    /// Disk reads outrun the network by orders of magnitude, so the old version
+    /// — read the whole file in a tight loop, hand every chunk to the socket —
+    /// queued the entire file in memory before the first megabyte had left the
+    /// Mac. Waiting for each chunk to be taken bounds that to one chunk. The
+    /// phone has the same guard on its side, and calls it `sendBlocking`.
     private func sendChunks(state: TransferState, fromOffset offset: Int64 = 0) {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self = self else { return }
 
             let chunkSize = 64 * 1024 // 64KB
 
-            guard let fileHandle = try? FileHandle(forReadingFrom: state.url) else { return }
+            guard let fileHandle = try? FileHandle(forReadingFrom: state.url) else {
+                self.onTransferError?(state.id, "Cannot open file for reading")
+                return
+            }
             defer { fileHandle.closeFile() }
 
             fileHandle.seek(toFileOffset: UInt64(offset))
             var currentOffset = offset
 
             while currentOffset < state.totalSize {
+                // A cancelled or failed transfer is dropped from the table;
+                // stop reading rather than pushing at a peer that gave up.
+                guard self.transfer(state.id) != nil else { return }
+
                 let bytesToRead = min(chunkSize, Int(state.totalSize - currentOffset))
                 guard let data = try? fileHandle.read(upToCount: bytesToRead), !data.isEmpty else { break }
 
@@ -193,20 +234,38 @@ class FileTransferManager {
 
                 var envelope = BridgProtoEnvelope()
                 envelope.fileChunk = chunk
-                self.onSendEnvelope?(envelope)
+
+                let taken = DispatchSemaphore(value: 0)
+                var ok = false
+                self.onSendEnvelope?(envelope) { success in
+                    ok = success
+                    taken.signal()
+                }
+                taken.wait()
+                guard ok else {
+                    self.onTransferError?(state.id, "Connection lost mid-transfer")
+                    return
+                }
 
                 currentOffset += Int64(data.count)
                 self.onTransferProgress?(state.id, currentOffset, state.totalSize)
             }
-
-            fileHandle.closeFile()
         }
     }
 
+    /// SHA-256 of a file, read incrementally.
+    ///
+    /// `Data(contentsOf:)` pulled the whole file into memory — for the sender
+    /// that meant a second full copy of a file it was already streaming.
     private func computeChecksum(url: URL) -> String {
-        guard let data = try? Data(contentsOf: url) else { return "" }
-        let hash = SHA256.hash(data: data)
-        return hash.map { String(format: "%02x", $0) }.joined()
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return "" }
+        defer { handle.closeFile() }
+
+        var hasher = SHA256()
+        while let block = try? handle.read(upToCount: 1024 * 1024), !block.isEmpty {
+            hasher.update(data: block)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     private func sanitizeFilename(_ filename: String) -> String {

@@ -45,11 +45,17 @@ Bridg uses a single persistent TCP connection per session, with all messages ser
 
 All frames after pairing are encrypted with **ChaCha20-Poly1305** (libsodium):
 
-1. During pairing, both sides perform X25519 ECDH to derive a shared secret
-2. The raw X25519 output is **not** used directly. It is run through
-   HKDF-SHA256 with salt `"bridg-session"`, empty info, 32-byte output. Both
-   sides must derive identically or every frame fails to open.
-3. Each frame is encrypted with a unique 12-byte nonce, laid out as:
+1. During pairing, both sides perform X25519 ECDH to derive a shared secret.
+   Both identity keys are long-term, so this raw secret is **the same on every
+   connection between a given pair of devices**.
+2. Each side also generates 16 fresh random bytes per connection — its
+   `session_salt` — and sends them in the clear in its last unencrypted frame.
+3. The raw X25519 output is **not** used directly. It is run through
+   HKDF-SHA256 with salt `"bridg-session"`, info `initiator_salt ||
+   responder_salt`, 32-byte output. The phone always dials in, so the phone is
+   always the initiator and its salt always comes first. Both sides must derive
+   identically — same order included — or every frame fails to open.
+4. Each frame is encrypted with a unique 12-byte nonce, laid out as:
    ```
    [0]     direction tag: 0x00 Mac->phone, 0x01 phone->Mac
    [1..3]  zero
@@ -58,13 +64,33 @@ All frames after pairing are encrypted with **ChaCha20-Poly1305** (libsodium):
    Both directions share one key, so the direction tag is what keeps their nonce
    spaces disjoint. A repeated (key, nonce) pair breaks ChaCha20-Poly1305
    catastrophically.
-4. The 16-byte Poly1305 auth tag is appended to each frame
+5. The 16-byte Poly1305 auth tag is appended to each frame
+
+**Why the salts matter.** The counter in step 4 restarts at 1 on every
+connection. If the key never changed, connection #2 would encrypt with exactly
+the (key, nonce) pairs connection #1 already used: XOR the two ciphertexts and
+the keystream cancels, leaking the plaintexts, and the repeated nonce also leaks
+the Poly1305 one-time key, which allows forgery. The per-connection salts are
+what make the key fresh, so the restarting counter is harmless. They are not
+secret — they only have to be unpredictable and unrepeated.
+
+**On receive**, a frame is rejected unless its nonce carries the *peer's*
+direction tag (otherwise one of our own frames could be reflected back at us and
+would open perfectly) and its counter is strictly greater than the highest one
+already accepted (the transport rides on ordered TCP, so a counter that does not
+advance is a replay). The counter is only advanced *after* the Poly1305 tag
+verifies — advancing on an unauthenticated nonce would let anyone who can write
+to the socket send one forged frame with a huge counter and wedge every real
+frame after it.
 
 CryptoKit's `ChaChaPoly` (Mac) and libsodium's
 `crypto_aead_chacha20poly1305_ietf_*` (Android) are byte-identical; both
 implementations are pinned to a shared test vector.
 
-Pre-pairing frames (the initial `PairRequest`) are sent in plaintext over TCP, then immediately upgraded to encrypted transport once the shared key is derived.
+Handshake frames are sent in plaintext over TCP — `PairRequest`/`PairResponse`
+when pairing, `PairResume`/`PairResumeAck` when resuming. Both sides upgrade to
+the encrypted transport immediately after the responder's reply, which is always
+the last plaintext frame in either direction.
 
 ## Message Types
 
@@ -77,11 +103,12 @@ Android (Initiator)                 Mac (Responder, shows the QR)
       │                                   │
       │  [scans QR: pubkey, token, host]  │
       │──── PairRequest ─────────────────>│
-      │     {pubkey, name, token}         │
+      │     {pubkey, name, token, salt}   │
       │                                   │  [verifies token matches the QR]
       │<──── PairResponse ────────────────│  (plaintext — the last one)
-      │      {pubkey, name, accepted}     │
-      │                                   │  [enables encryption]
+      │      {pubkey, name, accepted,     │
+      │       salt}                       │
+      │                                   │  [derives key, enables encryption]
       │  [checks responder pubkey ==      │
       │   the key it scanned]             │
       │  [derives key, enables encryption]│
@@ -89,9 +116,11 @@ Android (Initiator)                 Mac (Responder, shows the QR)
 
 Authentication rests on the QR being an out-of-band channel: the token proves to
 the Mac that the phone saw its screen, and comparing the responder's key against
-the scanned one proves to the phone it is talking to that same Mac. The
-`signature` field in `PairResponse` is unused — an earlier design signed with
-Ed25519 using an X25519 secret key, which can never verify.
+the scanned one proves to the phone it is talking to that same Mac.
+
+`PairResponse.session_salt` occupies field 3, which used to hold an unused
+Ed25519 `signature` — an earlier design signed with an X25519 secret key, which
+can never verify. Nothing ever populated it, so the number was free to reuse.
 
 ### Reconnect Flow
 
@@ -99,19 +128,23 @@ Ed25519 using an X25519 secret key, which can never verify.
 Android                             Mac
   │                                    │
   │──── PairResume ───────────────────>│  (plaintext)
-  │     {pubkey_hash, timestamp}       │
-  │  [enables encryption immediately]  │
-  │                                    │  [finds device by SHA-256(pubkey),
-  │                                    │   derives key, enables encryption]
-  │<──── PairResumeAck ────────────────│  (ENCRYPTED)
-  │       {accepted}                   │
-  │  [decrypting it is the proof]      │
+  │     {pubkey_hash, salt, timestamp} │
+  │                                    │  [finds device by SHA-256(pubkey)]
+  │<──── PairResumeAck ────────────────│  (plaintext — the last one)
+  │       {accepted, salt}             │
+  │                                    │  [derives key, enables encryption]
+  │  [derives key, enables encryption] │
 ```
 
-No signed nonce is needed: the ack is encrypted under the resumed session key,
-so decrypting it proves both sides hold the same key. Ordering matters — the
-phone must install its key immediately after writing `PairResume`, on the send
-path itself, or it races the Mac's already-encrypted reply.
+The ack must go out in the clear, because it carries the salt half the phone
+needs to derive this connection's key — it could not open a sealed one. It is
+the last plaintext frame in either direction; both sides switch to encrypted
+immediately after it. Key confirmation is implicit: if the two ends disagreed,
+the very next frame would fail to open and the link would be dropped.
+
+No signed nonce is involved. Possession of the stored identity key is what
+authenticates a resume: an attacker who knows the (public) key hash still cannot
+derive the session key, so it cannot read or produce a single valid frame.
 
 ### File Transfer
 
@@ -129,8 +162,18 @@ Sender                              Receiver
   │      {transfer_id, bytes_received, │
   │       complete}                    │
   │                                    │
-  │ [On resume: resend from last acked offset]
 ```
+
+Chunks are streamed strictly in order and both receivers enforce that: a chunk
+whose offset is not exactly where the last one ended fails the transfer rather
+than seeking past the gap and writing a file that is corrupt but reports
+success. `FileTransferStart.checksum` is a SHA-256 hex digest, verified by the
+receiver against the bytes it actually wrote whenever it is non-empty. The Mac
+populates it; the phone does not yet, so phone→Mac transfers are covered only by
+the per-frame Poly1305 tag and the offset check.
+
+Despite `offset` being on the wire, **there is no resume today**: either side
+failing a transfer discards it, and a reconnect starts over.
 
 ### Notification Flow
 
@@ -193,12 +236,51 @@ Mac (mirror window)                 Android (AccessibilityService)
   │   via AccessibilityService]        │
 ```
 
+### Device Status
+
+```
+Android                             Mac
+  │                                    │
+  │──── DeviceStatus ─────────────────>│  (on connect, then on change)
+  │     {battery_percent, charging,    │
+  │      battery_low}                  │
+```
+
+Android broadcasts `ACTION_BATTERY_CHANGED` on every voltage and temperature
+tick — far more often than the percentage moves — so the phone forwards a
+`DeviceStatus` only when a field the Mac actually renders has changed. It also
+re-sends unconditionally right after each handshake: a reconnect leaves the Mac
+knowing nothing, and the battery may not change again for minutes.
+
+### Remote Actions
+
+```
+Mac                                 Android
+  │                                    │
+  │──── RemoteAction ─────────────────>│
+  │     {action, url}                  │
+```
+
+- `RING` / `STOP_RING` — find-my-phone. Plays the alarm tone on the alarm
+  stream, which still sounds when the phone is silenced, at full volume (the
+  previous volume is restored when it stops). Stops on `STOP_RING` or after 30
+  seconds, whichever comes first.
+- `OPEN_URL` — offers a link as a high-priority notification the user taps.
+  It does not open the browser directly: Android 10+ blocks background activity
+  starts and does so *silently*, so a direct `startActivity` would work on some
+  devices and quietly do nothing on others.
+
+`url` is a trust boundary — the phone hands it to the system to launch — so both
+ends independently accept only `http` and `https` with a non-empty host.
+`intent://` can start arbitrary components and `file://` can expose local
+storage. The two validators are pinned by tests on each side.
+
 ## Security Model
 
 ### Trust Model
 
 - **Pairing**: Trust established via QR code exchange. Only devices that have scanned each other's QR codes can communicate.
-- **Reconnect**: Trust re-established via signed nonce challenge using the stored keypair. No QR re-scan needed.
+- **Reconnect**: Trust re-established by possession of the stored keypair — only a device holding the paired private key can derive the session key. No QR re-scan needed.
 - **Revocation**: Delete a paired device from either side to revoke access.
 
 ### Threat Mitigations
@@ -206,11 +288,15 @@ Mac (mirror window)                 Android (AccessibilityService)
 | Threat | Mitigation |
 |--------|-----------|
 | Unauthorized pairing | QR code required; no programmatic pairing path |
-| Replay attacks | Timestamped nonces with monotonic counter |
+| Replay attacks | Nonce counter must strictly advance; per-connection salts mean a frame captured in an earlier session cannot open in this one |
+| Reflection | Nonce direction tag must be the peer's, not ours |
+| Nonce reuse across reconnects | Session key is re-derived per connection from both sides' fresh salts |
 | MITM on LAN | ECDH key exchange; no plaintext after pairing |
 | Eavesdropping | ChaCha20-Poly1305 encryption on all frames |
 | Identity leakage | Pubkey advertised as SHA-256 hash, not raw key |
-| Rogue reconnect | Resume ack is encrypted under the stored session key |
+| Rogue reconnect | Only a holder of the paired private key can derive the session key |
+| Hostile URL push | `OPEN_URL` accepts only http/https with a host, checked on both ends |
+| Connection hijack by a LAN stranger | An unauthenticated newcomer cannot evict an established connection; a silently dead one is retired by the 30s pong timeout |
 
 ### Data at Rest
 

@@ -29,8 +29,15 @@ final class BridgTests: XCTestCase {
         let aPub = a.getOrCreatePublicKey()
         let bPub = b.getOrCreatePublicKey()
 
-        XCTAssertEqual(a.deriveSharedSecret(peerPublicKeyData: bPub),
-                       b.deriveSharedSecret(peerPublicKeyData: aPub))
+        // Both ends of one connection see the same pair of salts, in the same
+        // order — the phone's first, because the phone always dials in.
+        let info = SharedSecretKDF.connectionInfo(
+            initiatorSalt: SharedSecretKDF.randomSalt(),
+            responderSalt: SharedSecretKDF.randomSalt()
+        )
+
+        XCTAssertEqual(a.deriveSharedSecret(peerPublicKeyData: bPub, info: info),
+                       b.deriveSharedSecret(peerPublicKeyData: aPub, info: info))
     }
 
     func testPairingManagerQRContentRoundTrips() {
@@ -80,18 +87,67 @@ final class BridgTests: XCTestCase {
 
     // MARK: - Cross-platform crypto
 
+    private static let ikmVector = Data((0..<32).map { UInt8($0) })
+    private static let initiatorSaltVector = Data((0xa0...0xaf).map { UInt8($0) })
+    private static let responderSaltVector = Data((0xb0...0xbf).map { UInt8($0) })
+
     /// The Android side derives its session key with a hand-written HKDF-SHA256.
     /// These vectors were computed independently (Python hmac/hashlib) so that a
     /// drift in either implementation fails here rather than as a silent
     /// "decryption failed" at runtime.
     func testHKDFMatchesTheVectorAndroidDerives() {
-        let ikm = Data((0..<32).map { UInt8($0) })
-        let derived = SharedSecretKDF.derive(rawSharedSecret: ikm)
+        let derived = SharedSecretKDF.derive(
+            rawSharedSecret: Self.ikmVector,
+            info: SharedSecretKDF.connectionInfo(
+                initiatorSalt: Self.initiatorSaltVector,
+                responderSalt: Self.responderSaltVector
+            )
+        )
 
         XCTAssertEqual(
             derived.map { String(format: "%02x", $0) }.joined(),
-            "7e6f4ddb23319902fb5c5f3a72ec81ac8a9ddf4847463d093ff44fa72da1b3e3"
+            "9bcc4b236bef52d412a912466352d92779a5e878648cf7f60f9c12f4c26e6b63"
         )
+    }
+
+    /// The phone is always the initiator. Concatenating the two salts the other
+    /// way round gives a different key, so both sides must agree on the order —
+    /// and disagreeing is invisible until every frame fails to open.
+    func testSaltOrderIsPartOfTheContract() {
+        let forward = SharedSecretKDF.derive(
+            rawSharedSecret: Self.ikmVector,
+            info: SharedSecretKDF.connectionInfo(
+                initiatorSalt: Self.initiatorSaltVector, responderSalt: Self.responderSaltVector)
+        )
+        let reversed = SharedSecretKDF.derive(
+            rawSharedSecret: Self.ikmVector,
+            info: SharedSecretKDF.connectionInfo(
+                initiatorSalt: Self.responderSaltVector, responderSalt: Self.initiatorSaltVector)
+        )
+        XCTAssertNotEqual(forward, reversed)
+    }
+
+    /// The reason the salts exist at all.
+    ///
+    /// Both identity keys are long-term, so the raw ECDH secret is the same on
+    /// every connection, and the nonce counter restarts at zero each time. If
+    /// the session key did not change too, connection #2 would encrypt with the
+    /// exact (key, nonce) pairs connection #1 already used — which leaks the XOR
+    /// of the two plaintexts and the Poly1305 authentication key.
+    func testSessionKeyDiffersPerConnectionForOneIdentityPair() {
+        let sameEcdhSecretEveryTime = Self.ikmVector
+
+        var keys = Set<Data>()
+        for _ in 0..<50 {
+            // What each side actually does at the start of a connection.
+            let info = SharedSecretKDF.connectionInfo(
+                initiatorSalt: SharedSecretKDF.randomSalt(),
+                responderSalt: SharedSecretKDF.randomSalt()
+            )
+            keys.insert(SharedSecretKDF.derive(rawSharedSecret: sameEcdhSecretEveryTime, info: info))
+        }
+        XCTAssertEqual(keys.count, 50)
+        XCTAssertEqual(SharedSecretKDF.randomSalt().count, SharedSecretKDF.saltLength)
     }
 
     /// CryptoKit's ChaChaPoly must be byte-identical to libsodium's
@@ -133,6 +189,87 @@ final class BridgTests: XCTestCase {
         let macNonce = mac.encrypt(message)!.prefix(12)
         let phoneNonce = phone.encrypt(message)!.prefix(12)
         XCTAssertNotEqual(macNonce, phoneNonce)
+    }
+
+    /// A captured frame replayed at the same receiver must not open a second
+    /// time, and neither must one of our own frames reflected back at us —
+    /// both sides share a key, so the tag alone cannot tell them apart.
+    func testEncryptedTransportRejectsReplayAndReflection() {
+        let key = Data(repeating: 0x42, count: 32)
+        let mac = EncryptedTransport(sharedKey: key, sending: .macToPhone)
+        let phone = EncryptedTransport(sharedKey: key, sending: .phoneToMac)
+
+        let first = mac.encrypt(Data("one".utf8))!
+        let second = mac.encrypt(Data("two".utf8))!
+
+        XCTAssertEqual(phone.decrypt(first), Data("one".utf8))
+        XCTAssertEqual(phone.decrypt(second), Data("two".utf8))
+
+        // Replay of a frame already accepted.
+        XCTAssertNil(phone.decrypt(first))
+        XCTAssertNil(phone.decrypt(second))
+
+        // Reflection: the Mac's own frame handed back to the Mac.
+        XCTAssertNil(mac.decrypt(mac.encrypt(Data("three".utf8))!))
+
+        // A genuine later frame still gets through.
+        XCTAssertEqual(phone.decrypt(mac.encrypt(Data("four".utf8))!), Data("four".utf8))
+    }
+
+    /// A forged frame must not be able to poison the replay counter. Advancing
+    /// it before checking the tag would let anyone who can write to the socket
+    /// push one junk frame with a huge counter and wedge every real frame after.
+    func testForgedFrameDoesNotAdvanceTheReplayCounter() {
+        let key = Data(repeating: 0x42, count: 32)
+        let mac = EncryptedTransport(sharedKey: key, sending: .macToPhone)
+        let phone = EncryptedTransport(sharedKey: key, sending: .phoneToMac)
+
+        // Well-formed nonce, direction correct, counter enormous — garbage body.
+        var forged = Data([0x00, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])
+        forged.append(Data(repeating: 0xAB, count: 32))
+        XCTAssertNil(phone.decrypt(forged))
+
+        // The real next frame, counter 1, must still be accepted.
+        XCTAssertEqual(phone.decrypt(mac.encrypt(Data("real".utf8))!), Data("real".utf8))
+    }
+
+    // MARK: - Remote actions
+
+    /// The phone refuses anything but http(s) — see RemoteActionHandler
+    /// .isAllowedUrl, whose own test pins these same cases. If the two drift,
+    /// the Mac sends links the phone silently throws away.
+    func testOnlyHttpURLsAreSentToThePhone() {
+        XCTAssertTrue(AppState.isSendableURL("https://example.com"))
+        XCTAssertTrue(AppState.isSendableURL("http://example.com/a?b=c#d"))
+        XCTAssertTrue(AppState.isSendableURL("  https://example.com  "))
+        XCTAssertTrue(AppState.isSendableURL("HTTPS://example.com"))
+
+        XCTAssertFalse(AppState.isSendableURL("intent://scan/#Intent;scheme=zxing;end"))
+        XCTAssertFalse(AppState.isSendableURL("file:///etc/passwd"))
+        XCTAssertFalse(AppState.isSendableURL("javascript:alert(1)"))
+        XCTAssertFalse(AppState.isSendableURL("tel:+15551234"))
+        XCTAssertFalse(AppState.isSendableURL("example.com"))
+        XCTAssertFalse(AppState.isSendableURL("https://"))
+        XCTAssertFalse(AppState.isSendableURL(""))
+        XCTAssertFalse(AppState.isSendableURL("not a url at all"))
+    }
+
+    /// The menu bar picks its glyph from the percentage; an off-by-one in the
+    /// ranges shows a full battery at 12%.
+    func testBatterySymbolTracksTheLevel() {
+        func symbol(_ percent: Int, charging: Bool = false) -> String {
+            BatteryState(percent: percent, isCharging: charging, isLow: false).symbolName
+        }
+
+        XCTAssertEqual(symbol(0), "battery.0")
+        XCTAssertEqual(symbol(12), "battery.0")
+        XCTAssertEqual(symbol(13), "battery.25")
+        XCTAssertEqual(symbol(50), "battery.50")
+        XCTAssertEqual(symbol(75), "battery.75")
+        XCTAssertEqual(symbol(100), "battery.100")
+
+        // Charging wins over the level: that is the state you want to see.
+        XCTAssertEqual(symbol(5, charging: true), "battery.100.bolt")
     }
 
     /// Deinterleaving is the one piece of real logic in the mirror's audio

@@ -11,6 +11,11 @@ struct BridgMenuBarView: View {
     /// failed, which was every time. `openWindow` is the scene-aware way in.
     @Environment(\.openWindow) private var openWindow
 
+    /// http(s) link currently on the Mac clipboard, refreshed when the popover
+    /// opens. NSPasteboard is not observable, and polling it on a timer to keep
+    /// one menu item enabled is not worth the wakeups.
+    @State private var copiedLink: String?
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             // Connection status
@@ -28,6 +33,14 @@ struct BridgMenuBarView: View {
                     Text(device)
                         .font(.subheadline)
                         .foregroundColor(.secondary)
+
+                    if let battery = appState.phoneBattery {
+                        Spacer()
+                        Label("\(battery.percent)%", systemImage: battery.symbolName)
+                            .font(.subheadline)
+                            .foregroundColor(battery.isLow && !battery.isCharging ? .red : .secondary)
+                            .help(battery.isCharging ? "Charging" : "On battery")
+                    }
                 }
             }
 
@@ -45,6 +58,19 @@ struct BridgMenuBarView: View {
 
             Button(action: { openFileTransfer() }) {
                 Label("Send File", systemImage: "arrow.up.circle")
+            }
+            .disabled(!appState.connectionState.isConnected)
+
+            // The link you want on your phone is nearly always the one you just
+            // copied, so read the pasteboard rather than asking for a text field.
+            Button(action: { appState.openOnPhone(url: copiedLink ?? "") }) {
+                Label("Open Copied Link on Phone", systemImage: "safari")
+            }
+            .disabled(!appState.connectionState.isConnected || copiedLink == nil)
+            .help(copiedLink ?? "Copy an http(s) link first")
+
+            Button(action: { appState.ringPhone() }) {
+                Label("Ring Phone", systemImage: "bell.and.waves.left.and.right")
             }
             .disabled(!appState.connectionState.isConnected)
 
@@ -75,6 +101,7 @@ struct BridgMenuBarView: View {
         }
         .padding(16)
         .frame(width: 250)
+        .onAppear { copiedLink = AppState.urlOnPasteboard() }
     }
 
     /// `NSApp.sendAction(Selector(("showSettingsWindow:")))` is a private,

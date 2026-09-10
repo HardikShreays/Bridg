@@ -22,11 +22,24 @@ class BridgApplication : Application() {
             setShowBadge(false)
         }
 
+        // Links pushed from the Mac. High importance so it arrives as a
+        // heads-up banner you can tap straight away — a link you asked for on
+        // your phone is worthless if you have to go hunting in the shade.
+        val alertsChannel = NotificationChannel(
+            CHANNEL_ALERTS,
+            getString(R.string.alerts_channel_name),
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = getString(R.string.alerts_channel_description)
+        }
+
         val notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.createNotificationChannel(serviceChannel)
+        notificationManager.createNotificationChannel(alertsChannel)
     }
 
     companion object {
         const val CHANNEL_SERVICE = "bridg_service"
+        const val CHANNEL_ALERTS = "bridg_alerts"
     }
 }

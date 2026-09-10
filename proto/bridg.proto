@@ -10,6 +10,10 @@ option swift_prefix = "BridgProto";
 // Transport is length-prefixed: 4-byte big-endian length + serialized Envelope.
 message Envelope {
   uint64 id = 1;
+
+  // 110/111 held SessionLock/SessionLockRelease, which nothing ever sent.
+  reserved 110, 111;
+
   oneof payload {
     PairRequest pair_request = 10;
     PairResponse pair_response = 11;
@@ -39,37 +43,48 @@ message Envelope {
     MediaState media_state = 70;
     MediaCommand media_command = 71;
 
+    DeviceStatus device_status = 80;
+    RemoteAction remote_action = 81;
+
     Ping ping = 100;
     Pong pong = 101;
-
-    SessionLock session_lock = 110;
-    SessionLockRelease session_lock_release = 111;
   }
 }
 
 // ─── Pairing ─────────────────────────────────────────────────────────────────
 
+// Both identity keys are long-term, so the raw X25519 shared secret is the same
+// on every connection. Each side therefore contributes 16 fresh random bytes per
+// connection — `session_salt` below — and both are mixed into the HKDF that
+// derives the session key. Without them the key never changes, while the nonce
+// counter restarts at zero on every reconnect: the same (key, nonce) pair
+// encrypts two different frames, which leaks plaintext and the Poly1305 key.
+//
+// The salt always travels in the clear, in the last unencrypted frame each side
+// sends. It is not a secret — it only has to be fresh.
+
 message PairRequest {
   bytes sender_pubkey = 1;     // X25519 public key (32 bytes)
   string device_name = 2;      // Human-readable device name
   string pairing_token = 3;    // Token shown in QR for verification
+  bytes session_salt = 4;      // Initiator's 16 random bytes for this connection
 }
 
 message PairResponse {
   bytes responder_pubkey = 1;  // X25519 public key (32 bytes)
   string device_name = 2;
-  bytes signature = 3;         // Ed25519 signature of shared_context for verification
+  bytes session_salt = 3;      // Responder's 16 random bytes for this connection
   bool accepted = 4;
 }
 
 message PairResume {
   bytes device_pubkey_hash = 1; // SHA-256 hash of the paired device's public key
-  bytes signed_nonce = 2;       // Ed25519 signature of challenge nonce
-  uint64 timestamp = 3;         // Unix timestamp to prevent replay
+  bytes session_salt = 2;       // Initiator's 16 random bytes for this connection
+  uint64 timestamp = 3;         // Unix timestamp, informational only
 }
 
 message PairResumeAck {
-  bytes signed_nonce = 1;       // Responder's signed nonce for mutual auth
+  bytes session_salt = 1;       // Responder's 16 random bytes for this connection
   bool accepted = 2;
 }
 
@@ -264,20 +279,30 @@ message MediaCommand {
   Action action = 1;
 }
 
-// ─── Session Management ─────────────────────────────────────────────────────
+// ─── Device Status ───────────────────────────────────────────────────────────
 
-message SessionLock {
-  string holder_id = 1;         // Device holding the exclusive session
-  string holder_name = 2;
-  enum SessionType {
-    MIRROR = 0;
-    CAMERA = 1;
-  }
-  SessionType session_type = 3;
+// Phone → Mac. Sent once after the handshake and then only when something the
+// Mac actually displays has changed — Android broadcasts battery changes on
+// every voltage and temperature tick, which is far more often than the
+// percentage moves.
+message DeviceStatus {
+  uint32 battery_percent = 1;   // 0–100
+  bool charging = 2;
+  bool battery_low = 3;         // Android's own low-battery threshold
 }
 
-message SessionLockRelease {
-  string holder_id = 1;
+// ─── Remote Actions ──────────────────────────────────────────────────────────
+
+// Mac → phone. Small one-shot commands that do not deserve a message each.
+message RemoteAction {
+  enum Action {
+    ACTION_UNSPECIFIED = 0;
+    RING = 1;        // Find my phone: alarm at full volume, ignoring silent mode
+    STOP_RING = 2;
+    OPEN_URL = 3;    // Open `url` in the phone's default handler
+  }
+  Action action = 1;
+  string url = 2;    // OPEN_URL only; http/https are the only schemes accepted
 }
 
 // ─── Keepalive ───────────────────────────────────────────────────────────────

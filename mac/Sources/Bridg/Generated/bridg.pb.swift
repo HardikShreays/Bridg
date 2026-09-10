@@ -196,6 +196,22 @@ nonisolated struct BridgProtoEnvelope: Sendable {
     set {payload = .mediaCommand(newValue)}
   }
 
+  var deviceStatus: BridgProtoDeviceStatus {
+    get {
+      if case .deviceStatus(let v)? = payload {return v}
+      return BridgProtoDeviceStatus()
+    }
+    set {payload = .deviceStatus(newValue)}
+  }
+
+  var remoteAction: BridgProtoRemoteAction {
+    get {
+      if case .remoteAction(let v)? = payload {return v}
+      return BridgProtoRemoteAction()
+    }
+    set {payload = .remoteAction(newValue)}
+  }
+
   var ping: BridgProtoPing {
     get {
       if case .ping(let v)? = payload {return v}
@@ -210,22 +226,6 @@ nonisolated struct BridgProtoEnvelope: Sendable {
       return BridgProtoPong()
     }
     set {payload = .pong(newValue)}
-  }
-
-  var sessionLock: BridgProtoSessionLock {
-    get {
-      if case .sessionLock(let v)? = payload {return v}
-      return BridgProtoSessionLock()
-    }
-    set {payload = .sessionLock(newValue)}
-  }
-
-  var sessionLockRelease: BridgProtoSessionLockRelease {
-    get {
-      if case .sessionLockRelease(let v)? = payload {return v}
-      return BridgProtoSessionLockRelease()
-    }
-    set {payload = .sessionLockRelease(newValue)}
   }
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -251,10 +251,10 @@ nonisolated struct BridgProtoEnvelope: Sendable {
     case audioFrame(BridgProtoAudioFrame)
     case mediaState(BridgProtoMediaState)
     case mediaCommand(BridgProtoMediaCommand)
+    case deviceStatus(BridgProtoDeviceStatus)
+    case remoteAction(BridgProtoRemoteAction)
     case ping(BridgProtoPing)
     case pong(BridgProtoPong)
-    case sessionLock(BridgProtoSessionLock)
-    case sessionLockRelease(BridgProtoSessionLockRelease)
 
   }
 
@@ -275,6 +275,9 @@ nonisolated struct BridgProtoPairRequest: Sendable {
   /// Token shown in QR for verification
   var pairingToken: String = String()
 
+  /// Initiator's 16 random bytes for this connection
+  var sessionSalt: Data = Data()
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
@@ -290,8 +293,8 @@ nonisolated struct BridgProtoPairResponse: Sendable {
 
   var deviceName: String = String()
 
-  /// Ed25519 signature of shared_context for verification
-  var signature: Data = Data()
+  /// Responder's 16 random bytes for this connection
+  var sessionSalt: Data = Data()
 
   var accepted: Bool = false
 
@@ -308,10 +311,10 @@ nonisolated struct BridgProtoPairResume: Sendable {
   /// SHA-256 hash of the paired device's public key
   var devicePubkeyHash: Data = Data()
 
-  /// Ed25519 signature of challenge nonce
-  var signedNonce: Data = Data()
+  /// Initiator's 16 random bytes for this connection
+  var sessionSalt: Data = Data()
 
-  /// Unix timestamp to prevent replay
+  /// Unix timestamp, informational only
   var timestamp: UInt64 = 0
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -324,8 +327,8 @@ nonisolated struct BridgProtoPairResumeAck: Sendable {
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
-  /// Responder's signed nonce for mutual auth
-  var signedNonce: Data = Data()
+  /// Responder's 16 random bytes for this connection
+  var sessionSalt: Data = Data()
 
   var accepted: Bool = false
 
@@ -913,65 +916,86 @@ nonisolated struct BridgProtoMediaCommand: Sendable {
   init() {}
 }
 
-nonisolated struct BridgProtoSessionLock: Sendable {
+/// Phone → Mac. Sent once after the handshake and then only when something the
+/// Mac actually displays has changed — Android broadcasts battery changes on
+/// every voltage and temperature tick, which is far more often than the
+/// percentage moves.
+nonisolated struct BridgProtoDeviceStatus: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
-  /// Device holding the exclusive session
-  var holderID: String = String()
+  /// 0–100
+  var batteryPercent: UInt32 = 0
 
-  var holderName: String = String()
+  var charging: Bool = false
 
-  var sessionType: BridgProtoSessionLock.SessionType = .mirror
+  /// Android's own low-battery threshold
+  var batteryLow: Bool = false
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  nonisolated enum SessionType: SwiftProtobuf.Enum, Swift.CaseIterable {
+  init() {}
+}
+
+/// Mac → phone. Small one-shot commands that do not deserve a message each.
+nonisolated struct BridgProtoRemoteAction: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var action: BridgProtoRemoteAction.Action = .unspecified
+
+  /// OPEN_URL only; http/https are the only schemes accepted
+  var url: String = String()
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  nonisolated enum Action: SwiftProtobuf.Enum, Swift.CaseIterable {
     typealias RawValue = Int
-    case mirror // = 0
-    case camera // = 1
+    case unspecified // = 0
+
+    /// Find my phone: alarm at full volume, ignoring silent mode
+    case ring // = 1
+    case stopRing // = 2
+
+    /// Open `url` in the phone's default handler
+    case openURL // = 3
     case UNRECOGNIZED(Int)
 
     init() {
-      self = .mirror
+      self = .unspecified
     }
 
     init?(rawValue: Int) {
       switch rawValue {
-      case 0: self = .mirror
-      case 1: self = .camera
+      case 0: self = .unspecified
+      case 1: self = .ring
+      case 2: self = .stopRing
+      case 3: self = .openURL
       default: self = .UNRECOGNIZED(rawValue)
       }
     }
 
     var rawValue: Int {
       switch self {
-      case .mirror: return 0
-      case .camera: return 1
+      case .unspecified: return 0
+      case .ring: return 1
+      case .stopRing: return 2
+      case .openURL: return 3
       case .UNRECOGNIZED(let i): return i
       }
     }
 
     // The compiler won't synthesize support with the UNRECOGNIZED case.
-    static let allCases: [BridgProtoSessionLock.SessionType] = [
-      .mirror,
-      .camera,
+    static let allCases: [BridgProtoRemoteAction.Action] = [
+      .unspecified,
+      .ring,
+      .stopRing,
+      .openURL,
     ]
 
   }
-
-  init() {}
-}
-
-nonisolated struct BridgProtoSessionLockRelease: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  var holderID: String = String()
-
-  var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
 }
@@ -1009,7 +1033,7 @@ fileprivate nonisolated let _protobuf_package = "bridg"
 
 nonisolated extension BridgProtoEnvelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".Envelope"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{4}\u{9}pair_request\0\u{3}pair_response\0\u{3}pair_resume\0\u{3}pair_resume_ack\0\u{4}\u{7}file_start\0\u{3}file_chunk\0\u{3}file_ack\0\u{3}file_cancel\0\u{2}\u{7}clipboard\0\u{2}\u{a}notification\0\u{3}notif_action\0\u{3}notif_dismiss\0\u{4}\u{8}input_event\0\u{4}\u{2}call_control\0\u{4}\u{8}video_frame\0\u{3}video_stream_start\0\u{3}video_stream_stop\0\u{3}audio_frame\0\u{4}\u{7}media_state\0\u{3}media_command\0\u{2}\u{1d}ping\0\u{1}pong\0\u{4}\u{9}session_lock\0\u{3}session_lock_release\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{4}\u{9}pair_request\0\u{3}pair_response\0\u{3}pair_resume\0\u{3}pair_resume_ack\0\u{4}\u{7}file_start\0\u{3}file_chunk\0\u{3}file_ack\0\u{3}file_cancel\0\u{2}\u{7}clipboard\0\u{2}\u{a}notification\0\u{3}notif_action\0\u{3}notif_dismiss\0\u{4}\u{8}input_event\0\u{4}\u{2}call_control\0\u{4}\u{8}video_frame\0\u{3}video_stream_start\0\u{3}video_stream_stop\0\u{3}audio_frame\0\u{4}\u{7}media_state\0\u{3}media_command\0\u{4}\u{9}device_status\0\u{3}remote_action\0\u{2}\u{13}ping\0\u{1}pong\0\u{c}n\u{1}\u{1}\u{c}o\u{1}\u{1}")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1278,6 +1302,32 @@ nonisolated extension BridgProtoEnvelope: SwiftProtobuf.Message, SwiftProtobuf._
           self.payload = .mediaCommand(v)
         }
       }()
+      case 80: try {
+        var v: BridgProtoDeviceStatus?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .deviceStatus(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .deviceStatus(v)
+        }
+      }()
+      case 81: try {
+        var v: BridgProtoRemoteAction?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .remoteAction(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .remoteAction(v)
+        }
+      }()
       case 100: try {
         var v: BridgProtoPing?
         var hadOneofValue = false
@@ -1302,32 +1352,6 @@ nonisolated extension BridgProtoEnvelope: SwiftProtobuf.Message, SwiftProtobuf._
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.payload = .pong(v)
-        }
-      }()
-      case 110: try {
-        var v: BridgProtoSessionLock?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .sessionLock(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .sessionLock(v)
-        }
-      }()
-      case 111: try {
-        var v: BridgProtoSessionLockRelease?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .sessionLockRelease(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .sessionLockRelease(v)
         }
       }()
       default: break
@@ -1424,6 +1448,14 @@ nonisolated extension BridgProtoEnvelope: SwiftProtobuf.Message, SwiftProtobuf._
       guard case .mediaCommand(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 71)
     }()
+    case .deviceStatus?: try {
+      guard case .deviceStatus(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 80)
+    }()
+    case .remoteAction?: try {
+      guard case .remoteAction(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 81)
+    }()
     case .ping?: try {
       guard case .ping(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 100)
@@ -1431,14 +1463,6 @@ nonisolated extension BridgProtoEnvelope: SwiftProtobuf.Message, SwiftProtobuf._
     case .pong?: try {
       guard case .pong(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 101)
-    }()
-    case .sessionLock?: try {
-      guard case .sessionLock(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 110)
-    }()
-    case .sessionLockRelease?: try {
-      guard case .sessionLockRelease(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 111)
     }()
     case nil: break
     }
@@ -1455,7 +1479,7 @@ nonisolated extension BridgProtoEnvelope: SwiftProtobuf.Message, SwiftProtobuf._
 
 nonisolated extension BridgProtoPairRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".PairRequest"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}sender_pubkey\0\u{3}device_name\0\u{3}pairing_token\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}sender_pubkey\0\u{3}device_name\0\u{3}pairing_token\0\u{3}session_salt\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1466,6 +1490,7 @@ nonisolated extension BridgProtoPairRequest: SwiftProtobuf.Message, SwiftProtobu
       case 1: try { try decoder.decodeSingularBytesField(value: &self.senderPubkey) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self.deviceName) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.pairingToken) }()
+      case 4: try { try decoder.decodeSingularBytesField(value: &self.sessionSalt) }()
       default: break
       }
     }
@@ -1481,6 +1506,9 @@ nonisolated extension BridgProtoPairRequest: SwiftProtobuf.Message, SwiftProtobu
     if !self.pairingToken.isEmpty {
       try visitor.visitSingularStringField(value: self.pairingToken, fieldNumber: 3)
     }
+    if !self.sessionSalt.isEmpty {
+      try visitor.visitSingularBytesField(value: self.sessionSalt, fieldNumber: 4)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1488,6 +1516,7 @@ nonisolated extension BridgProtoPairRequest: SwiftProtobuf.Message, SwiftProtobu
     if lhs.senderPubkey != rhs.senderPubkey {return false}
     if lhs.deviceName != rhs.deviceName {return false}
     if lhs.pairingToken != rhs.pairingToken {return false}
+    if lhs.sessionSalt != rhs.sessionSalt {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -1495,7 +1524,7 @@ nonisolated extension BridgProtoPairRequest: SwiftProtobuf.Message, SwiftProtobu
 
 nonisolated extension BridgProtoPairResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".PairResponse"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}responder_pubkey\0\u{3}device_name\0\u{1}signature\0\u{1}accepted\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}responder_pubkey\0\u{3}device_name\0\u{3}session_salt\0\u{1}accepted\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1505,7 +1534,7 @@ nonisolated extension BridgProtoPairResponse: SwiftProtobuf.Message, SwiftProtob
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularBytesField(value: &self.responderPubkey) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self.deviceName) }()
-      case 3: try { try decoder.decodeSingularBytesField(value: &self.signature) }()
+      case 3: try { try decoder.decodeSingularBytesField(value: &self.sessionSalt) }()
       case 4: try { try decoder.decodeSingularBoolField(value: &self.accepted) }()
       default: break
       }
@@ -1519,8 +1548,8 @@ nonisolated extension BridgProtoPairResponse: SwiftProtobuf.Message, SwiftProtob
     if !self.deviceName.isEmpty {
       try visitor.visitSingularStringField(value: self.deviceName, fieldNumber: 2)
     }
-    if !self.signature.isEmpty {
-      try visitor.visitSingularBytesField(value: self.signature, fieldNumber: 3)
+    if !self.sessionSalt.isEmpty {
+      try visitor.visitSingularBytesField(value: self.sessionSalt, fieldNumber: 3)
     }
     if self.accepted != false {
       try visitor.visitSingularBoolField(value: self.accepted, fieldNumber: 4)
@@ -1531,7 +1560,7 @@ nonisolated extension BridgProtoPairResponse: SwiftProtobuf.Message, SwiftProtob
   static func ==(lhs: BridgProtoPairResponse, rhs: BridgProtoPairResponse) -> Bool {
     if lhs.responderPubkey != rhs.responderPubkey {return false}
     if lhs.deviceName != rhs.deviceName {return false}
-    if lhs.signature != rhs.signature {return false}
+    if lhs.sessionSalt != rhs.sessionSalt {return false}
     if lhs.accepted != rhs.accepted {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
@@ -1540,7 +1569,7 @@ nonisolated extension BridgProtoPairResponse: SwiftProtobuf.Message, SwiftProtob
 
 nonisolated extension BridgProtoPairResume: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".PairResume"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}device_pubkey_hash\0\u{3}signed_nonce\0\u{1}timestamp\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}device_pubkey_hash\0\u{3}session_salt\0\u{1}timestamp\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1549,7 +1578,7 @@ nonisolated extension BridgProtoPairResume: SwiftProtobuf.Message, SwiftProtobuf
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularBytesField(value: &self.devicePubkeyHash) }()
-      case 2: try { try decoder.decodeSingularBytesField(value: &self.signedNonce) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.sessionSalt) }()
       case 3: try { try decoder.decodeSingularUInt64Field(value: &self.timestamp) }()
       default: break
       }
@@ -1560,8 +1589,8 @@ nonisolated extension BridgProtoPairResume: SwiftProtobuf.Message, SwiftProtobuf
     if !self.devicePubkeyHash.isEmpty {
       try visitor.visitSingularBytesField(value: self.devicePubkeyHash, fieldNumber: 1)
     }
-    if !self.signedNonce.isEmpty {
-      try visitor.visitSingularBytesField(value: self.signedNonce, fieldNumber: 2)
+    if !self.sessionSalt.isEmpty {
+      try visitor.visitSingularBytesField(value: self.sessionSalt, fieldNumber: 2)
     }
     if self.timestamp != 0 {
       try visitor.visitSingularUInt64Field(value: self.timestamp, fieldNumber: 3)
@@ -1571,7 +1600,7 @@ nonisolated extension BridgProtoPairResume: SwiftProtobuf.Message, SwiftProtobuf
 
   static func ==(lhs: BridgProtoPairResume, rhs: BridgProtoPairResume) -> Bool {
     if lhs.devicePubkeyHash != rhs.devicePubkeyHash {return false}
-    if lhs.signedNonce != rhs.signedNonce {return false}
+    if lhs.sessionSalt != rhs.sessionSalt {return false}
     if lhs.timestamp != rhs.timestamp {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
@@ -1580,7 +1609,7 @@ nonisolated extension BridgProtoPairResume: SwiftProtobuf.Message, SwiftProtobuf
 
 nonisolated extension BridgProtoPairResumeAck: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".PairResumeAck"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}signed_nonce\0\u{1}accepted\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_salt\0\u{1}accepted\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1588,7 +1617,7 @@ nonisolated extension BridgProtoPairResumeAck: SwiftProtobuf.Message, SwiftProto
       // allocates stack space for every case branch when no optimizations are
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
-      case 1: try { try decoder.decodeSingularBytesField(value: &self.signedNonce) }()
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.sessionSalt) }()
       case 2: try { try decoder.decodeSingularBoolField(value: &self.accepted) }()
       default: break
       }
@@ -1596,8 +1625,8 @@ nonisolated extension BridgProtoPairResumeAck: SwiftProtobuf.Message, SwiftProto
   }
 
   func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.signedNonce.isEmpty {
-      try visitor.visitSingularBytesField(value: self.signedNonce, fieldNumber: 1)
+    if !self.sessionSalt.isEmpty {
+      try visitor.visitSingularBytesField(value: self.sessionSalt, fieldNumber: 1)
     }
     if self.accepted != false {
       try visitor.visitSingularBoolField(value: self.accepted, fieldNumber: 2)
@@ -1606,7 +1635,7 @@ nonisolated extension BridgProtoPairResumeAck: SwiftProtobuf.Message, SwiftProto
   }
 
   static func ==(lhs: BridgProtoPairResumeAck, rhs: BridgProtoPairResumeAck) -> Bool {
-    if lhs.signedNonce != rhs.signedNonce {return false}
+    if lhs.sessionSalt != rhs.sessionSalt {return false}
     if lhs.accepted != rhs.accepted {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
@@ -2374,9 +2403,9 @@ nonisolated extension BridgProtoMediaCommand.Action: SwiftProtobuf._ProtoNamePro
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0ACTION_UNSPECIFIED\0\u{1}PLAY_PAUSE\0\u{1}NEXT\0\u{1}PREVIOUS\0")
 }
 
-nonisolated extension BridgProtoSessionLock: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  static let protoMessageName: String = _protobuf_package + ".SessionLock"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}holder_id\0\u{3}holder_name\0\u{3}session_type\0")
+nonisolated extension BridgProtoDeviceStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".DeviceStatus"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}battery_percent\0\u{1}charging\0\u{3}battery_low\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2384,43 +2413,39 @@ nonisolated extension BridgProtoSessionLock: SwiftProtobuf.Message, SwiftProtobu
       // allocates stack space for every case branch when no optimizations are
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.holderID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.holderName) }()
-      case 3: try { try decoder.decodeSingularEnumField(value: &self.sessionType) }()
+      case 1: try { try decoder.decodeSingularUInt32Field(value: &self.batteryPercent) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.charging) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.batteryLow) }()
       default: break
       }
     }
   }
 
   func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.holderID.isEmpty {
-      try visitor.visitSingularStringField(value: self.holderID, fieldNumber: 1)
+    if self.batteryPercent != 0 {
+      try visitor.visitSingularUInt32Field(value: self.batteryPercent, fieldNumber: 1)
     }
-    if !self.holderName.isEmpty {
-      try visitor.visitSingularStringField(value: self.holderName, fieldNumber: 2)
+    if self.charging != false {
+      try visitor.visitSingularBoolField(value: self.charging, fieldNumber: 2)
     }
-    if self.sessionType != .mirror {
-      try visitor.visitSingularEnumField(value: self.sessionType, fieldNumber: 3)
+    if self.batteryLow != false {
+      try visitor.visitSingularBoolField(value: self.batteryLow, fieldNumber: 3)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
 
-  static func ==(lhs: BridgProtoSessionLock, rhs: BridgProtoSessionLock) -> Bool {
-    if lhs.holderID != rhs.holderID {return false}
-    if lhs.holderName != rhs.holderName {return false}
-    if lhs.sessionType != rhs.sessionType {return false}
+  static func ==(lhs: BridgProtoDeviceStatus, rhs: BridgProtoDeviceStatus) -> Bool {
+    if lhs.batteryPercent != rhs.batteryPercent {return false}
+    if lhs.charging != rhs.charging {return false}
+    if lhs.batteryLow != rhs.batteryLow {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
 }
 
-nonisolated extension BridgProtoSessionLock.SessionType: SwiftProtobuf._ProtoNameProviding {
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0MIRROR\0\u{1}CAMERA\0")
-}
-
-nonisolated extension BridgProtoSessionLockRelease: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  static let protoMessageName: String = _protobuf_package + ".SessionLockRelease"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}holder_id\0")
+nonisolated extension BridgProtoRemoteAction: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".RemoteAction"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}action\0\u{1}url\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2428,24 +2453,33 @@ nonisolated extension BridgProtoSessionLockRelease: SwiftProtobuf.Message, Swift
       // allocates stack space for every case branch when no optimizations are
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.holderID) }()
+      case 1: try { try decoder.decodeSingularEnumField(value: &self.action) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.url) }()
       default: break
       }
     }
   }
 
   func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.holderID.isEmpty {
-      try visitor.visitSingularStringField(value: self.holderID, fieldNumber: 1)
+    if self.action != .unspecified {
+      try visitor.visitSingularEnumField(value: self.action, fieldNumber: 1)
+    }
+    if !self.url.isEmpty {
+      try visitor.visitSingularStringField(value: self.url, fieldNumber: 2)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
 
-  static func ==(lhs: BridgProtoSessionLockRelease, rhs: BridgProtoSessionLockRelease) -> Bool {
-    if lhs.holderID != rhs.holderID {return false}
+  static func ==(lhs: BridgProtoRemoteAction, rhs: BridgProtoRemoteAction) -> Bool {
+    if lhs.action != rhs.action {return false}
+    if lhs.url != rhs.url {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
+}
+
+nonisolated extension BridgProtoRemoteAction.Action: SwiftProtobuf._ProtoNameProviding {
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0ACTION_UNSPECIFIED\0\u{1}RING\0\u{1}STOP_RING\0\u{1}OPEN_URL\0")
 }
 
 nonisolated extension BridgProtoPing: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {

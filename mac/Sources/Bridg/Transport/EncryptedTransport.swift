@@ -20,6 +20,12 @@ final class EncryptedTransport {
     private var nonceCounter: UInt64 = 0
     private let lock = NSLock()
 
+    /// Highest counter accepted from the peer, so a replayed frame is refused.
+    private var lastPeerCounter: UInt64 = 0
+
+    /// The peer sends on the direction we do not.
+    private var receiveDirection: Direction { sendDirection == .macToPhone ? .phoneToMac : .macToPhone }
+
     init(sharedKey: Data, sending: Direction = .macToPhone) {
         self.symmetricKey = SymmetricKey(data: sharedKey)
         self.sendDirection = sending
@@ -42,6 +48,7 @@ final class EncryptedTransport {
         let tagSize = 16
         guard encrypted.count >= nonceSize + tagSize,
               let nonce = try? ChaChaPoly.Nonce(data: encrypted.prefix(nonceSize)) else { return nil }
+        guard let counter = checkNonce(encrypted.prefix(nonceSize)) else { return nil }
 
         let body = encrypted.dropFirst(nonceSize)
         guard let box = try? ChaChaPoly.SealedBox(
@@ -54,7 +61,46 @@ final class EncryptedTransport {
             print("Decryption failed — wrong key or tampered frame")
             return nil
         }
+
+        // Only now, with the tag verified. Advancing on an unauthenticated
+        // nonce would let anyone who can write to the socket send one forged
+        // frame with a huge counter and wedge every real frame after it.
+        commit(counter: counter)
         return plaintext
+    }
+
+    /// Reject anything the peer cannot legitimately have just sent.
+    ///
+    /// Both directions share one key, so a frame of ours reflected back at us
+    /// decrypts perfectly — the direction byte is what tells the two apart. And
+    /// because the transport rides on ordered TCP, a counter that does not
+    /// strictly increase is a replayed or reordered frame, never a normal one.
+    ///
+    /// This is defence in depth: the per-connection salt already means a frame
+    /// captured from an earlier session cannot open under this session's key.
+    private func checkNonce<C: Collection>(_ nonce: C) -> UInt64? where C.Element == UInt8 {
+        let bytes = Array(nonce)
+        guard bytes.count == 12 else { return nil }
+
+        guard bytes[0] == receiveDirection.rawValue else {
+            print("Frame carries our own direction byte — reflected")
+            return nil
+        }
+
+        let counter = bytes[4..<12].reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+        lock.lock()
+        defer { lock.unlock() }
+        guard counter > lastPeerCounter else {
+            print("Nonce counter did not advance (\(counter) <= \(lastPeerCounter)) — replayed")
+            return nil
+        }
+        return counter
+    }
+
+    private func commit(counter: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        lastPeerCounter = max(lastPeerCounter, counter)
     }
 
     private func nextNonce() -> ChaChaPoly.Nonce {

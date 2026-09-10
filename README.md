@@ -7,9 +7,12 @@ Built on proven capture approaches (inspired by scrcpy) with a custom protobuf-b
 ## Features
 
 - **Pairing**: One-time QR code pairing with X25519 key exchange, auto-reconnect
-- **File Transfer**: Drag-and-drop files between devices with resume support
+- **File Transfer**: Drag-and-drop files between devices, SHA-256 verified
 - **Notifications**: Phone notifications appear natively on Mac, with reply support
 - **Clipboard Sync**: Copy on one device, paste on the other
+- **Phone Battery**: Level and charging state in the Mac menu bar
+- **Ring Phone**: Find a silenced phone from the Mac
+- **Open Links on Phone**: Push the link you just copied straight to the phone
 - **Screen Mirroring**: Live phone screen on your Mac with low latency
 - **Input Control**: Click, type, and gesture on your phone from Mac
 

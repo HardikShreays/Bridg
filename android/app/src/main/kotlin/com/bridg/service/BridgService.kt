@@ -22,7 +22,11 @@ import com.bridg.notify.BridgNotificationListenerService
 import com.bridg.media.MediaControl
 import com.bridg.pairing.KeyManager
 import com.bridg.pairing.PairingManager
+import com.bridg.pairing.SessionKdf
+import com.bridg.remote.RemoteActionHandler
+import com.bridg.status.BatteryMonitor
 import com.bridg.proto.*
+import com.google.protobuf.ByteString
 import com.bridg.transport.BridgSocket
 import com.bridg.transport.ServiceDiscovery
 import com.bridg.ui.MainActivity
@@ -50,12 +54,21 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
     private lateinit var mediaControl: MediaControl
     private lateinit var clipboardManager: BridgClipboardManager
     private lateinit var fileTransferManager: FileTransferManager
+    private lateinit var batteryMonitor: BatteryMonitor
+    private lateinit var remoteActions: RemoteActionHandler
 
     private var mediaProjection: MediaProjection? = null
     private var isServiceRunning = false
 
     /** Set by PairingActivity after a successful QR scan; consumed on next connect. */
     @Volatile private var pendingPairing: PairingManager.QRData? = null
+
+    /**
+     * Our fresh salt for the connection currently handshaking. The Mac's half
+     * arrives in its reply, and the session key needs both — see
+     * [com.bridg.pairing.SessionKdf.deriveSessionKey].
+     */
+    @Volatile private var sessionSalt: ByteArray? = null
     @Volatile private var connected = false
 
     /** Last reported send percentage, so progress doesn't respam the notification. */
@@ -82,6 +95,8 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
         mediaControl = MediaControl(this)
         clipboardManager = BridgClipboardManager(this)
         fileTransferManager = FileTransferManager(this)
+        batteryMonitor = BatteryMonitor(this)
+        remoteActions = RemoteActionHandler(this)
 
         bridgSocket.setConnectionListener(this)
         bridgSocket.setReceiveListener { envelope -> handleIncomingEnvelope(envelope) }
@@ -192,6 +207,7 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
         startClipboardMonitoring()
         startNotificationForwarding()
         startCallStateMonitoring()
+        startBatteryMonitoring()
         Log.i(TAG, "Bridg service started")
     }
 
@@ -204,6 +220,8 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
         mediaControl.stop()
         clipboardManager.stopMonitoring()
         stopCallStateMonitoring()
+        batteryMonitor.stop()
+        remoteActions.stopRing()
         serviceDiscovery.stopDiscovery()
         bridgSocket.disconnect()
 
@@ -258,24 +276,46 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
      * just scanned a QR, otherwise a resume against the key we already hold.
      */
     private fun startHandshake() {
+        // A fresh salt per connection. Encryption cannot start until the Mac
+        // sends its own half back, so both frames below go out in the clear.
+        val salt = SessionKdf.randomSalt()
+        sessionSalt = salt
+
         val pairing = pendingPairing
         if (pairing != null) {
             val envelope = Envelope.newBuilder()
-                .setPairRequest(pairingManager.createPairRequest(pairing.token))
+                .setPairRequest(pairingManager.createPairRequest(pairing.token, salt))
                 .build()
             bridgSocket.send(envelope)
             return
         }
 
-        val peerKey = keyManager.getPairedPeerPublicKey()
-        if (peerKey == null) {
+        if (keyManager.getPairedPeerPublicKey() == null) {
             updateStatus("Not paired — scan the QR code on your Mac")
             return
         }
 
-        val sharedKey = keyManager.deriveSharedSecret(peerKey)
-        val envelope = Envelope.newBuilder().setPairResume(pairingManager.createPairResume()).build()
-        bridgSocket.sendThenEncrypt(envelope, sharedKey)
+        bridgSocket.send(Envelope.newBuilder().setPairResume(pairingManager.createPairResume(salt)).build())
+    }
+
+    /**
+     * Session key for this connection, from the Mac's salt and the one we sent.
+     * Null if the Mac sent none — an old build whose key would repeat on every
+     * reconnect, which is exactly what the salts prevent.
+     */
+    private fun sessionKeyFor(peerKey: ByteArray, macSalt: ByteString): ByteArray? {
+        val ourSalt = sessionSalt
+        if (ourSalt == null || macSalt.size() != SessionKdf.SALT_LENGTH) {
+            Log.e(TAG, "Handshake carried no session salt — refusing to connect")
+            updateStatus("Mac app is out of date — update it")
+            bridgSocket.disconnect()
+            return null
+        }
+        sessionSalt = null
+        return keyManager.deriveSharedSecret(
+            peerKey,
+            SessionKdf.connectionInfo(initiatorSalt = ourSalt, responderSalt = macSalt.toByteArray())
+        )
     }
 
     /**
@@ -287,6 +327,12 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
      * While an activity of ours holds focus the read is permitted.
      */
     fun syncClipboardNow() = clipboardManager.syncCurrentClip()
+
+    private fun startBatteryMonitoring() {
+        batteryMonitor.start { status ->
+            bridgSocket.send(Envelope.newBuilder().setDeviceStatus(status).build())
+        }
+    }
 
     private fun startClipboardMonitoring() {
         clipboardManager.startMonitoring(object : BridgClipboardManager.ClipboardForwarder {
@@ -649,17 +695,29 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
                     updateStatus("Pairing failed")
                     return
                 }
+                val sessionKey = sessionKeyFor(peerKey, envelope.pairResponse.sessionSalt) ?: return
                 pairingManager.completePairing(peerKey, envelope.pairResponse.deviceName)
                 pendingPairing = null
-                bridgSocket.setEncryptionKey(keyManager.deriveSharedSecret(peerKey))
+                bridgSocket.setEncryptionKey(sessionKey)
+                batteryMonitor.resend()
                 updateStatus("Paired with ${envelope.pairResponse.deviceName}")
             }
 
             Envelope.PayloadCase.PAIR_RESUME_ACK -> {
-                // Arriving decrypted at all proves both sides hold the same key.
-                if (envelope.pairResumeAck.accepted) updateStatus("Connected to Mac")
-                else updateStatus("Mac rejected the connection — re-pair")
+                // The ack is the Mac's last plaintext frame; it carries the salt
+                // half we need before either side can seal anything.
+                if (!envelope.pairResumeAck.accepted) {
+                    updateStatus("Mac rejected the connection — re-pair")
+                    return
+                }
+                val peerKey = keyManager.getPairedPeerPublicKey() ?: return
+                val sessionKey = sessionKeyFor(peerKey, envelope.pairResumeAck.sessionSalt) ?: return
+                bridgSocket.setEncryptionKey(sessionKey)
+                batteryMonitor.resend()
+                updateStatus("Connected to Mac")
             }
+
+            Envelope.PayloadCase.REMOTE_ACTION -> remoteActions.handle(envelope.remoteAction)
 
             Envelope.PayloadCase.CLIPBOARD -> clipboardManager.handleRemoteClipboard(envelope.clipboard)
 
@@ -783,6 +841,7 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
 
     override fun onDisconnected() {
         connected = false
+        sessionSalt = null
         bridgSocket.clearEncryption()
         updateStatus("Disconnected — searching…")
     }
@@ -795,6 +854,7 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
 
     override fun onConnectionLost(error: Exception) {
         connected = false
+        sessionSalt = null
         bridgSocket.clearEncryption()
         Log.e(TAG, "Connection lost: ${error.message}")
         updateStatus("Reconnecting…")

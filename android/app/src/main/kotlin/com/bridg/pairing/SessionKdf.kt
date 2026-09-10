@@ -15,8 +15,37 @@ object SessionKdf {
     /** Must match the salt the Mac passes to HKDF. */
     private val SALT = "bridg-session".toByteArray()
 
-    fun deriveSessionKey(rawSharedSecret: ByteArray): ByteArray =
-        hkdfSha256(rawSharedSecret, SALT, ByteArray(0), 32)
+    /** Bytes each side contributes per connection. Not secret, only fresh. */
+    const val SALT_LENGTH = 16
+
+    /** A fresh per-connection salt. */
+    fun randomSalt(): ByteArray =
+        ByteArray(SALT_LENGTH).also { java.security.SecureRandom().nextBytes(it) }
+
+    /**
+     * HKDF `info` for one connection, in a fixed order both sides agree on.
+     *
+     * The phone always dials in, so it is always the initiator; the Mac always
+     * answers. Concatenating in the other order would give the two ends
+     * different keys.
+     */
+    fun connectionInfo(initiatorSalt: ByteArray, responderSalt: ByteArray): ByteArray =
+        initiatorSalt + responderSalt
+
+    /**
+     * Derive the session key for one connection.
+     *
+     * [info] MUST carry both sides' fresh salts. Both identity keys are
+     * long-term, so [rawSharedSecret] is identical on every connection; it is
+     * only the salts that stop the key — and with it the whole (key, nonce)
+     * sequence, since the nonce counter restarts at zero each time — from
+     * repeating. A repeated (key, nonce) under ChaCha20-Poly1305 leaks the XOR
+     * of two plaintexts and the Poly1305 authentication key.
+     */
+    fun deriveSessionKey(rawSharedSecret: ByteArray, info: ByteArray): ByteArray {
+        require(info.isNotEmpty()) { "session key derived without per-connection salts" }
+        return hkdfSha256(rawSharedSecret, SALT, info, 32)
+    }
 
     /** RFC 5869 HKDF-SHA256: extract, then expand. */
     fun hkdfSha256(ikm: ByteArray, salt: ByteArray, info: ByteArray, length: Int): ByteArray {

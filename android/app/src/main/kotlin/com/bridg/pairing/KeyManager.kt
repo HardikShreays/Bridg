@@ -62,17 +62,21 @@ class KeyManager(context: Context) {
         MessageDigest.getInstance("SHA-256").digest(getOrCreatePublicKey())
 
     /**
-     * Derive the session key from our private key and the peer's public key.
+     * Derive the session key from our private key and the peer's public key,
+     * bound to this connection's salts.
      *
      * The raw X25519 output is NOT the session key. The Mac runs it through
-     * HKDF-SHA256 (CryptoKit's `hkdfDerivedSymmetricKey`) with salt
+     * HKDF-SHA256 (CryptoKit's `HKDF<SHA256>.deriveKey`) with salt
      * "bridg-session"; returning the bare scalarmult result here gave the two
      * sides different keys, so every encrypted frame failed to open.
+     *
+     * [info] carries both sides' per-connection salts — see
+     * [SessionKdf.deriveSessionKey] for why it is not optional.
      */
-    fun deriveSharedSecret(peerPublicKey: ByteArray): ByteArray {
+    fun deriveSharedSecret(peerPublicKey: ByteArray, info: ByteArray): ByteArray {
         val sharedSecret = ByteArray(32)
         sodium.cryptoScalarMult(sharedSecret, getPrivateKey(), peerPublicKey)
-        return SessionKdf.deriveSessionKey(sharedSecret)
+        return SessionKdf.deriveSessionKey(sharedSecret, info)
     }
 
     fun savePairedDevice(deviceId: String, publicKey: ByteArray, name: String) {

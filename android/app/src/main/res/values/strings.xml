@@ -3,6 +3,8 @@
     <string name="app_name">Bridg</string>
     <string name="notification_channel_name">Bridg Service</string>
     <string name="notification_channel_description">Persistent connection to Mac</string>
+    <string name="alerts_channel_name">Links and alerts</string>
+    <string name="alerts_channel_description">Links and alerts sent from your Mac</string>
     <string name="notification_transfer_title">File Transfer</string>
     <string name="notification_transfer_in_progress">Transferring files…</string>
     <string name="pairing_title">Pair with Mac</string>

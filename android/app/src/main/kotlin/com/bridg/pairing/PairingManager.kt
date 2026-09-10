@@ -26,17 +26,19 @@ class PairingManager(
         return Base64.getEncoder().encodeToString(tokenBytes)
     }
 
-    fun createPairRequest(pairingToken: String): PairRequest =
+    fun createPairRequest(pairingToken: String, sessionSalt: ByteArray): PairRequest =
         PairRequest.newBuilder()
             .setSenderPubkey(ByteString.copyFrom(keyManager.getOrCreatePublicKey()))
             .setDeviceName(keyManager.getDeviceName())
             .setPairingToken(pairingToken)
+            .setSessionSalt(ByteString.copyFrom(sessionSalt))
             .build()
 
     /** Sent on reconnect so the Mac can look up the session key without a re-scan. */
-    fun createPairResume(): PairResume =
+    fun createPairResume(sessionSalt: ByteArray): PairResume =
         PairResume.newBuilder()
             .setDevicePubkeyHash(ByteString.copyFrom(keyManager.getPublicKeyHash()))
+            .setSessionSalt(ByteString.copyFrom(sessionSalt))
             .setTimestamp(System.currentTimeMillis())
             .build()
 

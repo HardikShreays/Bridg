@@ -121,20 +121,7 @@ class BridgSocket {
         runBlocking { sendQueue.send(Outgoing(envelope)) }
     }
 
-    /**
-     * Send this frame in the clear, then switch the link to encrypted.
-     *
-     * The switch has to happen on the send loop itself: the Mac turns on
-     * encryption the moment it reads our PairResume, so installing the key from
-     * the caller would race the queue and either seal the handshake frame or
-     * miss the Mac's already-encrypted reply.
-     */
-    fun sendThenEncrypt(envelope: Envelope, sharedKey: ByteArray) {
-        val result = sendQueue.trySend(Outgoing(envelope, sharedKey))
-        if (result.isFailure) Log.w(TAG, "Send queue full — handshake dropped")
-    }
-
-    private data class Outgoing(val envelope: Envelope, val installKeyAfterSend: ByteArray? = null)
+    private data class Outgoing(val envelope: Envelope)
 
     fun setReceiveListener(listener: (Envelope) -> Unit) { receiveListener = listener }
 
@@ -173,7 +160,6 @@ class BridgSocket {
                         } ?: continue
                     }
                     FrameCodec.writeFrame(out, bytes)
-                    outgoing.installKeyAfterSend?.let { setEncryptionKey(it) }
                 } catch (e: IOException) {
                     Log.e(TAG, "Send error: ${e.message}")
                     connectionListener?.onConnectionLost(e)
@@ -190,7 +176,15 @@ class BridgSocket {
                 try {
                     val frame = FrameCodec.readFrame(input ?: break) ?: break
                     val transport = encryptedTransport
-                    val bytes = if (transport != null) transport.decrypt(frame) ?: continue else frame
+                    val bytes = if (transport != null) transport.decrypt(frame) else frame
+                    if (bytes == null) {
+                        // A frame that will not open is a replay, a forgery or a
+                        // key mismatch. None of those get better by reading the
+                        // next frame, so drop the link instead of looping.
+                        Log.e(TAG, "Rejected frame — dropping connection")
+                        connectionListener?.onConnectionLost(IOException("frame rejected"))
+                        break
+                    }
                     receiveListener?.invoke(Envelope.parseFrom(bytes))
                 } catch (e: IOException) {
                     if (isActive) {

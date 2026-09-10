@@ -107,7 +107,10 @@ class FileTransferManager(private val context: Context) {
             direction = Direction.INCOMING,
             expectedSize = start.size,
             checksum = start.checksum,
-            outputStream = outputStream
+            outputStream = outputStream,
+            // Hashed as the bytes go past. The file lands in MediaStore, which
+            // we cannot reliably re-open and re-read to hash afterwards.
+            digest = if (start.checksum.isNotEmpty()) MessageDigest.getInstance("SHA-256") else null
         )
 
         activeTransfers[start.transferId] = state
@@ -138,7 +141,9 @@ class FileTransferManager(private val context: Context) {
                     "Out-of-order chunk: got offset ${chunk.offset}, expected ${state.bytesTransferred}"
                 )
             }
-            outputStream.write(chunk.data.toByteArray())
+            val bytes = chunk.data.toByteArray()
+            outputStream.write(bytes)
+            state.digest?.update(bytes)
 
             state.bytesTransferred = chunk.offset + chunk.data.size().toLong()
 
@@ -147,10 +152,12 @@ class FileTransferManager(private val context: Context) {
                 outputStream.flush()
                 outputStream.close()
 
-                // Verify checksum if provided
-                if (state.checksum.isNotEmpty()) {
-                    // Would verify SHA-256 here
-                    Log.d(TAG, "Checksum verification: ${state.checksum}")
+                // The Mac sends a SHA-256 of what it read off its own disk. This
+                // used to log the digest and compare nothing, so a file that
+                // arrived truncated or mangled still reported success.
+                val actual = state.digest?.digest()?.joinToString("") { "%02x".format(it) }
+                if (actual != null && actual != state.checksum) {
+                    throw java.io.IOException("Checksum mismatch — file discarded")
                 }
 
                 publish(sanitize(state.filename))
@@ -328,7 +335,9 @@ class FileTransferManager(private val context: Context) {
         val checksum: String = "",
         var bytesTransferred: Long = 0,
         var error: String? = null,
-        val outputStream: OutputStream? = null
+        val outputStream: OutputStream? = null,
+        /** Incoming transfers only, and only when the peer sent a checksum. */
+        val digest: MessageDigest? = null
     )
 
     interface TransferListener {

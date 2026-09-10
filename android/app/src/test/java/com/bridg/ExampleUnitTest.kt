@@ -3,8 +3,12 @@ package com.bridg
 import com.bridg.notify.BridgNotificationListenerService
 import com.bridg.notify.BridgNotificationListenerService.Seen
 import com.bridg.pairing.SessionKdf
+import com.bridg.proto.DeviceStatus
+import com.bridg.remote.RemoteActionHandler
+import com.bridg.status.BatteryMonitor
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -30,6 +34,12 @@ class NotificationDedupTest {
 
 class SessionKdfTest {
 
+    private val ikm = ByteArray(32) { it.toByte() }
+    private val initiatorSalt = ByteArray(16) { (0xa0 + it).toByte() }
+    private val responderSalt = ByteArray(16) { (0xb0 + it).toByte() }
+
+    private fun ByteArray.hex() = joinToString("") { "%02x".format(it) }
+
     /**
      * The same vector the Mac's BridgTests.testHKDFMatchesTheVectorAndroidDerives
      * asserts. If either side's derivation drifts, one of the two tests fails
@@ -37,13 +47,56 @@ class SessionKdfTest {
      */
     @Test
     fun derivesTheSameSessionKeyAsTheMac() {
-        val ikm = ByteArray(32) { it.toByte() }
-        val key = SessionKdf.deriveSessionKey(ikm)
+        val key = SessionKdf.deriveSessionKey(
+            ikm,
+            SessionKdf.connectionInfo(initiatorSalt, responderSalt)
+        )
 
         assertEquals(
-            "7e6f4ddb23319902fb5c5f3a72ec81ac8a9ddf4847463d093ff44fa72da1b3e3",
-            key.joinToString("") { "%02x".format(it) }
+            "9bcc4b236bef52d412a912466352d92779a5e878648cf7f60f9c12f4c26e6b63",
+            key.hex()
         )
+    }
+
+    /**
+     * We are always the initiator — the phone dials in — so our salt comes
+     * first. Swapping the order gives a different key, and the two sides
+     * disagreeing is invisible until every frame fails to open.
+     */
+    @Test
+    fun saltOrderIsPartOfTheContract() {
+        assertNotEquals(
+            SessionKdf.deriveSessionKey(ikm, SessionKdf.connectionInfo(initiatorSalt, responderSalt)).hex(),
+            SessionKdf.deriveSessionKey(ikm, SessionKdf.connectionInfo(responderSalt, initiatorSalt)).hex()
+        )
+    }
+
+    /**
+     * The reason the salts exist at all.
+     *
+     * Both identity keys are long-term, so the raw ECDH secret is the same on
+     * every connection, and the nonce counter restarts at zero each time. If
+     * the session key did not change too, connection #2 would encrypt with the
+     * exact (key, nonce) pairs connection #1 already used — which leaks the XOR
+     * of the two plaintexts and the Poly1305 authentication key.
+     */
+    @Test
+    fun sessionKeyDiffersPerConnectionForOneIdentityPair() {
+        val keys = (1..50).map {
+            SessionKdf.deriveSessionKey(
+                ikm,
+                SessionKdf.connectionInfo(SessionKdf.randomSalt(), SessionKdf.randomSalt())
+            ).hex()
+        }.toSet()
+
+        assertEquals(50, keys.size)
+        assertEquals(SessionKdf.SALT_LENGTH, SessionKdf.randomSalt().size)
+    }
+
+    /** Deriving without the per-connection salts is the bug, so it must not compile away silently. */
+    @Test(expected = IllegalArgumentException::class)
+    fun refusesToDeriveWithoutSalts() {
+        SessionKdf.deriveSessionKey(ikm, ByteArray(0))
     }
 
     /** RFC 5869 test case 1, so the HKDF itself is pinned to the spec. */
@@ -59,5 +112,64 @@ class SessionKdfTest {
                 "34007208d5b887185865",
             SessionKdf.hkdfSha256(ikm, salt, info, 42).joinToString("") { "%02x".format(it) }
         )
+    }
+}
+
+
+class BatteryForwardingTest {
+
+    private fun status(percent: Int, charging: Boolean = false, low: Boolean = false) =
+        DeviceStatus.newBuilder()
+            .setBatteryPercent(percent)
+            .setCharging(charging)
+            .setBatteryLow(low)
+            .build()
+
+    @Test fun firstReadingAlwaysForwards() =
+        assertTrue(BatteryMonitor.shouldForward(null, status(50)))
+
+    /**
+     * ACTION_BATTERY_CHANGED fires on voltage and temperature ticks, many times
+     * a minute, with the percentage unmoved. Forwarding those is pure wire churn.
+     */
+    @Test fun unchangedReadingIsDropped() =
+        assertFalse(BatteryMonitor.shouldForward(status(50), status(50)))
+
+    @Test fun percentChangeForwards() =
+        assertTrue(BatteryMonitor.shouldForward(status(50), status(49)))
+
+    @Test fun pluggingInForwardsEvenAtTheSamePercent() =
+        assertTrue(BatteryMonitor.shouldForward(status(50), status(50, charging = true)))
+
+    @Test fun crossingTheLowThresholdForwards() =
+        assertTrue(BatteryMonitor.shouldForward(status(15), status(15, low = true)))
+}
+
+class RemoteUrlTest {
+
+    /**
+     * The Mac hands us a string and we hand it to the system to launch, so this
+     * is a trust boundary. The Mac's AppState.isSendableURL must agree — its own
+     * test pins the same cases.
+     */
+    @Test
+    fun acceptsOnlyHttpAndHttps() {
+        assertTrue(RemoteActionHandler.isAllowedUrl("https://example.com"))
+        assertTrue(RemoteActionHandler.isAllowedUrl("http://example.com/a?b=c#d"))
+        assertTrue(RemoteActionHandler.isAllowedUrl("  https://example.com  "))
+        assertTrue(RemoteActionHandler.isAllowedUrl("HTTPS://example.com"))
+    }
+
+    @Test
+    fun rejectsEverythingElse() {
+        // intent:// can start arbitrary components; file:// exposes storage.
+        assertFalse(RemoteActionHandler.isAllowedUrl("intent://scan/#Intent;scheme=zxing;end"))
+        assertFalse(RemoteActionHandler.isAllowedUrl("file:///data/data/com.bridg/databases"))
+        assertFalse(RemoteActionHandler.isAllowedUrl("javascript:alert(1)"))
+        assertFalse(RemoteActionHandler.isAllowedUrl("tel:+15551234"))
+        assertFalse(RemoteActionHandler.isAllowedUrl("example.com"))
+        assertFalse(RemoteActionHandler.isAllowedUrl("https://"))
+        assertFalse(RemoteActionHandler.isAllowedUrl(""))
+        assertFalse(RemoteActionHandler.isAllowedUrl("not a url at all"))
     }
 }

@@ -122,9 +122,11 @@ class KeychainManager {
         return data
     }
 
-    /// Derive a shared secret from our private key and a peer's public key
-    /// using X25519 ECDH via CryptoKit.
-    func deriveSharedSecret(peerPublicKeyData: Data) -> Data? {
+    /// Derive the session key from our private key and a peer's public key
+    /// using X25519 ECDH via CryptoKit, bound to this connection's salts.
+    ///
+    /// See `SharedSecretKDF.derive` for why `info` is not optional.
+    func deriveSharedSecret(peerPublicKeyData: Data, info: Data) -> Data? {
         guard let privateKeyData = getPrivateKeyData() else {
             print("No private key found")
             return nil
@@ -143,7 +145,7 @@ class KeychainManager {
         do {
             let sharedSecret = try privateKey.sharedSecretFromKeyAgreement(with: peerPublicKey)
             let raw = sharedSecret.withUnsafeBytes { Data($0) }
-            return SharedSecretKDF.derive(rawSharedSecret: raw)
+            return SharedSecretKDF.derive(rawSharedSecret: raw, info: info)
         } catch {
             print("Key exchange failed: \(error)")
             return nil
@@ -205,11 +207,39 @@ enum SharedSecretKDF {
     /// Must stay in lockstep with KeyManager.deriveSharedSecret on Android.
     static let salt = Data("bridg-session".utf8)
 
-    static func derive(rawSharedSecret: Data) -> Data {
+    /// Bytes each side contributes per connection. Not secret, only fresh.
+    static let saltLength = 16
+
+    /// A fresh per-connection salt.
+    static func randomSalt() -> Data {
+        var bytes = [UInt8](repeating: 0, count: saltLength)
+        _ = SecRandomCopyBytes(kSecRandomDefault, saltLength, &bytes)
+        return Data(bytes)
+    }
+
+    /// HKDF `info` for one connection, in a fixed order both sides agree on.
+    ///
+    /// The phone always dials in, so it is always the initiator; the Mac always
+    /// answers. Concatenating in the other order would give the two ends
+    /// different keys.
+    static func connectionInfo(initiatorSalt: Data, responderSalt: Data) -> Data {
+        initiatorSalt + responderSalt
+    }
+
+    /// Derive the session key for one connection.
+    ///
+    /// `info` MUST carry both sides' fresh salts. Both identity keys are
+    /// long-term, so `rawSharedSecret` is identical on every connection; it is
+    /// only the salts that stop the key — and with it the whole (key, nonce)
+    /// sequence, since the nonce counter restarts at zero each time — from
+    /// repeating. A repeated (key, nonce) under ChaCha20-Poly1305 leaks the XOR
+    /// of two plaintexts and the Poly1305 authentication key.
+    static func derive(rawSharedSecret: Data, info: Data) -> Data {
+        precondition(!info.isEmpty, "session key derived without per-connection salts")
         let key = HKDF<SHA256>.deriveKey(
             inputKeyMaterial: SymmetricKey(data: rawSharedSecret),
             salt: salt,
-            info: Data(),
+            info: info,
             outputByteCount: 32
         )
         return key.withUnsafeBytes { Data($0) }

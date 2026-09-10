@@ -22,6 +22,13 @@ class EncryptedTransport(
     private val sodium = LazySodiumAndroid(SodiumAndroid())
     private val nonceCounter = AtomicLong(0)
 
+    /** Highest counter accepted from the peer, so a replayed frame is refused. */
+    private var lastPeerCounter = 0L
+
+    /** The peer sends on the direction we do not. */
+    private val receiveDirection: Byte =
+        if (sendDirection == DIRECTION_MAC_TO_PHONE) DIRECTION_PHONE_TO_MAC else DIRECTION_MAC_TO_PHONE
+
     private val key: ByteArray = sharedKey.copyOf(AEAD.CHACHA20POLY1305_IETF_KEYBYTES)
 
     fun encrypt(plaintext: ByteArray): ByteArray? {
@@ -50,6 +57,8 @@ class EncryptedTransport(
         }
 
         val nonce = encrypted.copyOfRange(0, NONCE_SIZE)
+        val counter = checkNonce(nonce) ?: return null
+
         val ciphertext = encrypted.copyOfRange(NONCE_SIZE, encrypted.size)
         val plaintext = ByteArray(ciphertext.size - AEAD.CHACHA20POLY1305_IETF_ABYTES)
         val messageLength = longArrayOf(0)
@@ -63,8 +72,43 @@ class EncryptedTransport(
             Log.e(TAG, "Decryption failed — wrong key or tampered frame")
             return null
         }
+        // Only now, with the tag verified. Advancing on an unauthenticated
+        // nonce would let anyone who can write to the socket send one forged
+        // frame with a huge counter and wedge every real frame after it.
+        commit(counter)
+
         val written = if (messageLength[0] > 0) messageLength[0].toInt() else plaintext.size
         return plaintext.copyOf(written)
+    }
+
+    /**
+     * Reject anything the peer cannot legitimately have just sent.
+     *
+     * Both directions share one key, so a frame of ours reflected back at us
+     * decrypts perfectly — the direction byte is what tells the two apart. And
+     * because the transport rides on ordered TCP, a counter that does not
+     * strictly increase is a replayed or reordered frame, never a normal one.
+     *
+     * This is defence in depth: the per-connection salt already means a frame
+     * captured from an earlier session cannot open under this session's key.
+     */
+    private fun checkNonce(nonce: ByteArray): Long? {
+        if (nonce[0] != receiveDirection) {
+            Log.e(TAG, "Frame carries our own direction byte — reflected")
+            return null
+        }
+        val counter = java.nio.ByteBuffer.wrap(nonce, 4, 8).long
+        synchronized(this) {
+            if (counter <= lastPeerCounter) {
+                Log.e(TAG, "Nonce counter did not advance ($counter <= $lastPeerCounter) — replayed")
+                return null
+            }
+        }
+        return counter
+    }
+
+    private fun commit(counter: Long) {
+        synchronized(this) { lastPeerCounter = maxOf(lastPeerCounter, counter) }
     }
 
     /** Layout must match the Mac: [0] direction, [1..3] zero, [4..11] big-endian counter. */
