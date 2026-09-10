@@ -32,7 +32,9 @@ import com.bridg.transport.ServiceDiscovery
 import com.bridg.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -43,6 +45,9 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
 
     private val binder = LocalBinder()
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /** The one pending redial after a failed connect; see [scheduleRetry]. */
+    private var retryJob: Job? = null
 
     private lateinit var keyManager: KeyManager
     private lateinit var pairingManager: PairingManager
@@ -857,6 +862,28 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
         connected = false
         Log.e(TAG, "Connection failed: ${error.message}")
         updateStatus("Connection failed — retrying…")
+        scheduleRetry()
+    }
+
+    /**
+     * Redial the known host after a failed connect.
+     *
+     * The status always said "retrying…" but nothing retried. A refused dial —
+     * the Mac app quitting or relaunching, the Mac waking up — was the end of it,
+     * and Bonjour does not report a service it has already found, so the phone
+     * stayed disconnected until the app was restarted. Known-host and discovery
+     * dials often fail together; cancelling first keeps it to one pending retry.
+     *
+     * ponytail: fixed delay, no backoff. With the Mac off this network that is a
+     * dial every ~15 s (10 s connect timeout + delay); add backoff if it shows up
+     * in battery use.
+     */
+    private fun scheduleRetry() {
+        retryJob?.cancel()
+        retryJob = scope.launch {
+            delay(RETRY_DELAY_MS)
+            if (isServiceRunning && !connected) connectToKnownHost()
+        }
     }
 
     override fun onConnectionLost(error: Exception) {
@@ -885,6 +912,7 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
     companion object {
         private const val TAG = "BridgService"
         private const val NOTIFICATION_ID = 1
+        private const val RETRY_DELAY_MS = 5_000L
 
         /** Same pattern as [BridgNotificationListenerService.instance]: lets an
          *  independently-lifecycled system service find us without a bind. */
