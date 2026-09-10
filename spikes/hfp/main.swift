@@ -109,8 +109,34 @@ guard let device = paired.first(where: { ($0.name ?? "").localizedCaseInsensitiv
 
 log("HFP gateway record on \(device.name ?? "?"): \(device.handsFreeAudioGatewayServiceRecord() != nil)")
 let spike = Spike(device: device, auto: args.contains("--auto"))
-spike.hf.connect()
-log("connecting… call the phone from another number")
+
+// Seen in the system log: when the phone was not yet linked to the Mac,
+// connect() did a baseband connect and went on to find the phone's RFCOMM
+// services. When the phone was *already* linked, it skipped the baseband step
+// and nothing further happened — no RFCOMM open, no delegate callback. So drop
+// an existing link first, then connect, and retry until HFP is up.
+// ("setupRFCOMMChannelForDevice: No channel" is logged in both cases; ignore it.)
+func connectUntilUp(attempt: Int = 1) {
+    guard !spike.hf.isConnected else { return }
+    log("connect attempt \(attempt) — phone already linked: \(device.isConnected())")
+    if device.isConnected() {
+        device.closeConnection()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { spike.hf.connect() }
+    } else {
+        spike.hf.connect()
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+        guard !spike.hf.isConnected else { return }
+        if attempt == 5 {
+            log("no HFP link after 5 attempts — on the phone, Bluetooth → this Mac → is 'Phone calls' on?")
+            return
+        }
+        spike.hf.disconnect()
+        connectUntilUp(attempt: attempt + 1)
+    }
+}
+DispatchQueue.main.asyncAfter(deadline: .now() + 2) { connectUntilUp() }
+log("waiting 2 s for Bluetooth to settle, then connecting…")
 
 Thread.detachNewThread {
     while let line = readLine() {
