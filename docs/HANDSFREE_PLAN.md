@@ -1,5 +1,28 @@
 # Plan: talk on phone calls through the Mac (Bluetooth Hands-Free)
 
+> **Status: stopped at Phase 0 — no-go for audio.** Tested 2026-09-10/11 on
+> macOS 26.6 (Darwin 25.6, BCM4388 controller) with a Samsung Galaxy A35,
+> using `spikes/hfp/main.swift`. Phases 1–3 below were not started.
+>
+> | Check | Result |
+> |---|---|
+> | Mac connects to the phone as an HFP hands-free unit | ✅ RFCOMM ch. 4 + SLC handshake (`AT+CIND=?`, `AT+CIND?`, `AT+CMER`) in ~2 s |
+> | Call state / signal / battery indicators reach the Mac | ✅ `callSetupMode`, `isCallActive`, `signalStrength`, `batteryCharge` all fire |
+> | Answer from the Mac over HFP (`acceptCall`) | ⚠️ untested — the A35 sends no `RING`, so the spike's trigger never fired |
+> | Mac opens call audio (`transferAudioToComputer` → `connectSCO`) | ❌ `scoConnectionOpened` with `-536870201` (`kIOReturnUnsupported`). System log shows `Failed to open SCO connection` 2 ms after the call, with no Bluetooth traffic — refused locally by the IOBluetooth shim |
+> | Phone pushes call audio to the Mac (chosen from the in-call audio route) | ❌ no SCO connection, no callback; audio stayed on the phone |
+>
+> Gotcha found on the way: if the phone is already baseband-linked to the Mac,
+> `connect()` silently does nothing. Close the link first (`closeConnection()`),
+> then connect.
+>
+> **Conclusion:** call *control* over HFP works, call *audio* does not, and
+> macOS has no other public API for SCO. Talking through the Mac is not
+> achievable in Bridg. Answer/decline stays on the existing Wi-Fi
+> `CallControl` path; for voice, use earbuds paired to the phone (multipoint
+> buds can stay connected to the Mac too). Revisit only if a macOS release
+> changes `connectSCO` behaviour — rerun the spike first.
+
 ## Why this route
 
 Bridg already answers and ends calls over Wi-Fi (`CallControl` →
