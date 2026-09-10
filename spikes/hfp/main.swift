@@ -72,7 +72,7 @@ final class Spike: NSObject, IOBluetoothHandsFreeDeviceDelegate {
         case "m": hf.transferAudioToComputer()
         case "p": hf.transferAudioToPhone()
         case "s": hf.connectSCO()
-        case "d" where parts.count == 2: hf.dialNumber(parts[1])
+        case "d" where parts.count == 2: hf.dialNumber(parts[1].filter { !$0.isWhitespace })
         case "l": hf.currentCallList()
         case "q": hf.disconnect(); exit(0)
         default: log("?  a e m p s d<num> l q")
