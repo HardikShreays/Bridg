@@ -16,6 +16,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import java.net.ServerSocket
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -237,6 +239,31 @@ class BridgSocketTest {
                 assertEquals(Envelope.PayloadCase.PAIR_RESUME, Envelope.parseFrom(first!!).payloadCase)
             }
             socket.disconnect()
+        }
+    }
+
+    /**
+     * When the Mac quits or relaunches it closes the socket cleanly, and the
+     * read loop treated end-of-stream as a quiet exit. Nothing reported the
+     * loss, so the phone sat on the dead socket, still "connected", and never
+     * redialled.
+     */
+    @Test
+    fun peerClosingTheSocketReportsTheLoss() {
+        ServerSocket(0).use { server ->
+            val lost = CountDownLatch(1)
+            val socket = BridgSocket()
+            socket.setConnectionListener(object : BridgSocket.ConnectionListener {
+                override fun onConnected() {}
+                override fun onDisconnected() {}
+                override fun onConnectionFailed(error: Exception) {}
+                override fun onConnectionLost(error: Exception) = lost.countDown()
+            })
+            runBlocking { socket.connect("127.0.0.1", server.localPort) }
+            server.accept().close()
+
+            assertTrue(lost.await(2, TimeUnit.SECONDS))
+            assertFalse(socket.isConnected())
         }
     }
 }

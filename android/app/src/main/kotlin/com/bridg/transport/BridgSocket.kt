@@ -205,7 +205,14 @@ class BridgSocket {
         receiveJob = scope.launch {
             while (isActive) {
                 try {
-                    val frame = FrameCodec.readFrame(input ?: break) ?: break
+                    val frame = FrameCodec.readFrame(input ?: break)
+                    if (frame == null) {
+                        // End of stream: the Mac closed the socket (quit,
+                        // relaunch, sleep). Leaving quietly kept the dead socket
+                        // "connected", so the phone never redialled.
+                        if (isActive) lost(s, IOException("Connection closed by Mac"))
+                        break
+                    }
                     val transport = encryptedTransport
                     val bytes = if (transport != null) transport.decrypt(frame) else frame
                     if (bytes == null) {
