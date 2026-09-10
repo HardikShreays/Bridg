@@ -254,6 +254,17 @@ final class BridgTests: XCTestCase {
         XCTAssertFalse(AppState.isSendableURL("not a url at all"))
     }
 
+    /// The number goes to the phone as an `ATD` command on the Bluetooth
+    /// control link. Anything past digits and `+*#` could tack a second AT
+    /// command on — `;` separates commands and `\r` ends one.
+    func testDialledNumbersKeepOnlyDialableCharacters() {
+        XCTAssertEqual(PhoneDialer.dialable("+91 98765-43210"), "+919876543210")
+        XCTAssertEqual(PhoneDialer.dialable("*123#"), "*123#")
+        XCTAssertEqual(PhoneDialer.dialable("123;\rATH"), "123")
+        XCTAssertEqual(PhoneDialer.dialable("١٢٣"), "")  // non-ASCII digits
+        XCTAssertEqual(PhoneDialer.dialable("call me"), "")
+    }
+
     /// The menu bar picks its glyph from the percentage; an off-by-one in the
     /// ranges shows a full battery at 12%.
     func testBatterySymbolTracksTheLevel() {

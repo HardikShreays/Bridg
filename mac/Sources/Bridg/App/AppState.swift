@@ -25,6 +25,8 @@ final class AppState: ObservableObject {
 
     /// Phone battery, as last reported. Nil until the phone says.
     @Published var phoneBattery: BatteryState?
+    /// Outcome of the last click-to-call, shown under the menu bar dial field.
+    @Published var dialStatus: String?
     @Published var activeTransfers: [TransferInfo] = []
     /// Set on any failed transfer so `FileTransferView` can show it, instead
     /// of the transfer just silently disappearing from the list.
@@ -39,6 +41,7 @@ final class AppState: ObservableObject {
     private let clipboardSync = ClipboardSync()
     private let notificationManager = NotificationManager()
     private let fileTransferManager = FileTransferManager()
+    private let phoneDialer = PhoneDialer()
     // Fed from the network queue alongside video, never from the main actor.
     nonisolated(unsafe) private let audioPlayer = AudioPlayer()
     // Driven from ConnectionManager's network queue, never from the main actor.
@@ -257,6 +260,12 @@ final class AppState: ObservableObject {
         connectionManager.send(envelope)
     }
 
+    /// Have the phone place a call. Goes over Bluetooth Hands-Free, not the
+    /// Wi-Fi link, so it works whenever the phone is paired with this Mac.
+    func dial(_ number: String) {
+        phoneDialer.dial(number)
+    }
+
     private func send(_ event: BridgProtoInputEvent) {
         var envelope = BridgProtoEnvelope()
         envelope.inputEvent = event
@@ -390,6 +399,10 @@ final class AppState: ObservableObject {
 
         notificationManager.onCallAction = { [weak self] action in
             self?.sendCallControl(action)
+        }
+
+        phoneDialer.onStatus = { [weak self] status in
+            Task { @MainActor in self?.dialStatus = status }
         }
 
         // Clearing a banner on the Mac clears it on the phone too, so the same

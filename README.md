@@ -10,7 +10,7 @@ Built on proven capture approaches (inspired by scrcpy) with a custom protobuf-b
 - **File Transfer**: Drag-and-drop files between devices, SHA-256 verified
 - **Notifications**: Phone notifications appear natively on Mac, with reply support
 - **Clipboard Sync**: Copy on one device, paste on the other
-- **Calls**: Answer or decline incoming calls from the Mac. The conversation itself stays on the phone (or earbuds paired to it): Android blocks apps from carrying call audio, and macOS refuses to open Bluetooth call audio as a hands-free device — tested in [docs/HANDSFREE_PLAN.md](docs/HANDSFREE_PLAN.md)
+- **Calls**: Answer or decline incoming calls from the Mac, or start one from the menu bar (dialling needs the phone paired with the Mac in System Settings → Bluetooth). The conversation itself stays on the phone (or earbuds paired to it): Android blocks apps from carrying call audio, and macOS refuses to open Bluetooth call audio as a hands-free device — tested in [docs/HANDSFREE_PLAN.md](docs/HANDSFREE_PLAN.md)
 - **Phone Battery**: Level and charging state in the Mac menu bar
 - **Ring Phone**: Find a silenced phone from the Mac
 - **Open Links on Phone**: Push the link you just copied straight to the phone

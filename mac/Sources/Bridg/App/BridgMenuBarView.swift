@@ -16,6 +16,8 @@ struct BridgMenuBarView: View {
     /// one menu item enabled is not worth the wakeups.
     @State private var copiedLink: String?
 
+    @State private var dialNumber = ""
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             // Connection status
@@ -73,6 +75,24 @@ struct BridgMenuBarView: View {
                 Label("Ring Phone", systemImage: "bell.and.waves.left.and.right")
             }
             .disabled(!appState.connectionState.isConnected)
+
+            // Dialling rides Bluetooth, not the Wi-Fi link, so it is not gated on
+            // the connection state like the actions above.
+            HStack {
+                TextField("Call a number", text: $dialNumber)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { appState.dial(dialNumber) }
+                Button(action: { appState.dial(dialNumber) }) {
+                    Image(systemName: "phone.fill")
+                }
+                .disabled(PhoneDialer.dialable(dialNumber).isEmpty)
+                .help("Place the call on your phone over Bluetooth")
+            }
+            if let status = appState.dialStatus {
+                Text(status)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
 
             Divider()
 

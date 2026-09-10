@@ -39,6 +39,11 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <string>Bridg connects to your phone over your local network.</string>
     <key>NSBonjourServices</key>
     <array><string>_bridg._tcp</string></array>
+
+    <!-- Click-to-call dials through the phone over Bluetooth Hands-Free.
+         Without this key macOS kills the app on its first Bluetooth call. -->
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Bridg asks your paired phone to place calls you start on the Mac.</string>
 </dict>
 </plist>
 PLIST

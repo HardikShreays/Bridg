@@ -9,6 +9,7 @@
 > | Mac connects to the phone as an HFP hands-free unit | ✅ RFCOMM ch. 4 + SLC handshake (`AT+CIND=?`, `AT+CIND?`, `AT+CMER`) in ~2 s |
 > | Call state / signal / battery indicators reach the Mac | ✅ `callSetupMode`, `isCallActive`, `signalStrength`, `batteryCharge` all fire |
 > | Answer from the Mac over HFP (`acceptCall`) | ⚠️ untested — the A35 sends no `RING`, so the spike's trigger never fired |
+> | Dial from the Mac over HFP (`dialNumber`) | ✅ the phone places the call — shipped as click-to-call in the menu bar (`mac/Sources/Bridg/Calls/PhoneDialer.swift`) |
 > | Mac opens call audio (`transferAudioToComputer` → `connectSCO`) | ❌ `scoConnectionOpened` with `-536870201` (`kIOReturnUnsupported`). System log shows `Failed to open SCO connection` 2 ms after the call, with no Bluetooth traffic — refused locally by the IOBluetooth shim |
 > | Phone pushes call audio to the Mac (chosen from the in-call audio route) | ❌ no SCO connection, no callback; audio stayed on the phone |
 >
