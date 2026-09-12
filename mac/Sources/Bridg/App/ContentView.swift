@@ -9,6 +9,15 @@ struct ContentView: View {
         NavigationSplitView {
             // Sidebar
             List {
+                // The detail pane only shows Home until another item is picked;
+                // without this link there was no way back to it (or its media controls).
+                NavigationLink {
+                    HomeDetailView()
+                        .environmentObject(appState)
+                } label: {
+                    Label("Home", systemImage: "house")
+                }
+
                 Section("Connection") {
                     NavigationLink {
                         ConnectionView()
