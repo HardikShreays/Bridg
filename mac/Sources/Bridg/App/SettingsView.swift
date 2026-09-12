@@ -54,7 +54,8 @@ struct SettingsView: View {
                 HStack {
                     Text("Version")
                     Spacer()
-                    Text("0.2.0")
+                    // Read from Info.plist (set in make_app.sh) so it can't go stale again.
+                    Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev")
                         .foregroundColor(.secondary)
                 }
 
