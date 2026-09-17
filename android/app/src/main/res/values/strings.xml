@@ -31,5 +31,6 @@
     <string name="access_input">Remote input</string>
     <string name="access_on">On</string>
     <string name="access_off">Off</string>
+    <string name="action_check_updates">Check for updates</string>
     <string name="connect_first">Connect to your Mac first</string>
 </resources>

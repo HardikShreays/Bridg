@@ -436,7 +436,7 @@ final class AppState: ObservableObject {
         case .clipboard(let update):
             guard isClipboardSyncing else { return }
             clipboardSync.handleRemoteClipboard(update)
-            lastClipboardContent = update.content
+            lastClipboardContent = update.imageData.isEmpty ? update.content : "[Image]"
 
         case .notification(let event):
             guard isNotificationForwarding else { return }

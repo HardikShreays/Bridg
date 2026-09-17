@@ -77,8 +77,7 @@ class ClipboardSync {
 
         lastChangeCount = pasteboard.changeCount
 
-        // Store in clipboard history
-        saveToHistory(content: update.content, origin: .remote)
+        saveToHistory(content: update.content.isEmpty ? "[Image]" : update.content, origin: .remote)
     }
 
     /// Get clipboard history.
@@ -117,27 +116,32 @@ class ClipboardSync {
         update.originID = deviceID
         update.timestamp = UInt64(Date().timeIntervalSince1970 * 1000)
 
+        // One update per copy: text if there is any, otherwise an image. Sending
+        // both fired twice for a single copy.
         if let text = pasteboard.string(forType: .string) {
             update.content = text
             update.mimeType = "text/plain"
-
             saveToHistory(content: text, origin: .local)
             onClipboardChanged?(update)
+        } else if let image = (pasteboard.readObjects(forClasses: [NSImage.self]) as? [NSImage])?.first,
+                  let data = ClipboardSync.encode(image) {
+            update.imageData = data.bytes
+            update.mimeType = data.mime
+            saveToHistory(content: "[Image]", origin: .local)
+            onClipboardChanged?(update)
         }
+    }
 
-        // Handle images (check for image data up to max size)
-        if let images = pasteboard.readObjects(forClasses: [NSImage.self]) as? [NSImage],
-           let image = images.first {
-            if let tiffData = image.tiffRepresentation,
-               let rep = NSBitmapImageRep(data: tiffData),
-               let pngData = rep.representation(using: .png, properties: [:]) {
-                if pngData.count <= ClipboardSync.maxImageSize {
-                    update.imageData = pngData
-                    update.mimeType = "image/png"
-                    onClipboardChanged?(update)
-                }
-            }
+    /// PNG, or JPEG when the PNG won't fit one transport frame (Retina screenshots often don't).
+    static func encode(_ image: NSImage) -> (bytes: Data, mime: String)? {
+        guard let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) else { return nil }
+        if let png = rep.representation(using: .png, properties: [:]), png.count <= maxImageSize {
+            return (png, "image/png")
         }
+        if let jpg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.8]), jpg.count <= maxImageSize {
+            return (jpg, "image/jpeg")
+        }
+        return nil
     }
 
     private func saveToHistory(content: String, origin: Origin) {
@@ -159,7 +163,8 @@ class ClipboardSync {
 
     enum Origin { case local, remote }
 
-    static let maxImageSize = 5 * 1024 * 1024 // 5MB
+    /// Must fit one transport frame (FrameCodec.maxFrameSize, 4 MB) with room for the envelope.
+    static let maxImageSize = 3 * 1024 * 1024
 }
 
 struct ClipboardItem: Identifiable {

@@ -59,6 +59,8 @@ struct SettingsView: View {
                         .foregroundColor(.secondary)
                 }
 
+                Button("Check for Updates…") { Task { await UpdateChecker.check() } }
+
                 Link("View on GitHub", destination: URL(string: "https://github.com/HardikShreays/Bridg")!)
             }
         }

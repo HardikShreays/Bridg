@@ -307,4 +307,12 @@ final class BridgTests: XCTestCase {
         XCTAssertEqual(channels[0][1], 0.0, accuracy: 0.0001)
         XCTAssertEqual(channels[1][1], 1.0, accuracy: 0.0001)
     }
+
+    func testUpdateVersionComparesNumerically() {
+        XCTAssertTrue(UpdateChecker.isNewer("0.10.0", than: "0.9.3"))
+        XCTAssertTrue(UpdateChecker.isNewer("0.3.3", than: "0.3.2"))
+        XCTAssertFalse(UpdateChecker.isNewer("0.3.2", than: "0.3.2"))
+        XCTAssertFalse(UpdateChecker.isNewer("0.3", than: "0.3.0"))
+        XCTAssertFalse(UpdateChecker.isNewer("0.3.1", than: "0.3.2"))
+    }
 }

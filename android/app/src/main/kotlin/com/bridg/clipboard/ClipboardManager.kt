@@ -14,7 +14,7 @@ import java.util.UUID
  *
  * Renamed to BridgClipboardManager to avoid collision with android.content.ClipboardManager.
  */
-class BridgClipboardManager(context: Context) {
+class BridgClipboardManager(private val context: Context) {
 
     private val systemClipboardManager =
         context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
@@ -77,8 +77,12 @@ class BridgClipboardManager(context: Context) {
             builder.setContent(text.toString())
             builder.setMimeType("text/plain")
         } else if (item.uri != null) {
-            // Image URI — would need ContentResolver to read bytes.
-            Log.d(TAG, "Image URI detected but not yet supported for sync")
+            // Our own FileProvider Uri is an image we just applied from the Mac.
+            if (item.uri.authority == authority) return
+            val bytes = readImage(item.uri) ?: return
+            builder.setImageData(com.google.protobuf.ByteString.copyFrom(bytes))
+            builder.setMimeType("image/*")
+            clipboardForwarder?.onClipboardChanged(builder.build())
             return
         } else {
             return
@@ -118,7 +122,17 @@ class BridgClipboardManager(context: Context) {
         appliedFromRemote = update.content
 
         handler.post {
-            if (update.content.isNotEmpty()) {
+            if (!update.imageData.isEmpty) {
+                // Another app can only paste a content:// Uri, so the bytes go
+                // to a cache file served by our FileProvider. One file, overwritten.
+                val file = java.io.File(context.cacheDir, "shared/clipboard.img")
+                file.parentFile?.mkdirs()
+                file.writeBytes(update.imageData.toByteArray())
+                val uri = androidx.core.content.FileProvider.getUriForFile(context, authority, file)
+                systemClipboardManager.setPrimaryClip(
+                    android.content.ClipData.newUri(context.contentResolver, "bridg_sync", uri)
+                )
+            } else if (update.content.isNotEmpty()) {
                 val clip = android.content.ClipData.newPlainText(
                     "bridg_sync",
                     update.content
@@ -129,6 +143,32 @@ class BridgClipboardManager(context: Context) {
         }
     }
 
+    private val authority = "${context.packageName}.fileprovider"
+
+    /**
+     * Image bytes behind a copied Uri, or null if it isn't an image. Anything
+     * over the cap is re-encoded at half size: a whole update must fit in one
+     * 4 MB transport frame, and phone photos routinely don't.
+     */
+    private fun readImage(uri: android.net.Uri): ByteArray? = try {
+        val type = context.contentResolver.getType(uri)
+        if (type?.startsWith("image/") != true) null
+        else {
+            val raw = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            if (raw == null || raw.size <= MAX_IMAGE_SIZE) raw
+            else {
+                val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = 2 }
+                val bmp = android.graphics.BitmapFactory.decodeByteArray(raw, 0, raw.size, opts)
+                java.io.ByteArrayOutputStream().also { bmp?.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+                    .toByteArray().takeIf { it.isNotEmpty() && it.size <= MAX_IMAGE_SIZE }
+                    .also { if (it == null) Log.w(TAG, "Copied image too large to sync") }
+            }
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "Cannot read copied image: ${e.message}")
+        null
+    }
+
     /**
      * Get the device's unique ID for echo prevention.
      */
@@ -136,7 +176,8 @@ class BridgClipboardManager(context: Context) {
 
     companion object {
         private const val TAG = "BridgClipboard"
-        const val MAX_IMAGE_SIZE = 5 * 1024 * 1024L // 5MB cap for image sync
+        /** Must fit one transport frame (FrameCodec.MAX_FRAME_SIZE, 4 MB) with room for the envelope. */
+        const val MAX_IMAGE_SIZE = 3 * 1024 * 1024
     }
 
     interface ClipboardForwarder {

@@ -267,3 +267,17 @@ class BridgSocketTest {
         }
     }
 }
+
+class UpdateVersionTest {
+    private fun newer(a: String, b: String) = com.bridg.update.UpdateChecker.isNewer(a, b)
+
+    @Test
+    fun comparesNumericallyNotAsText() {
+        assertTrue(newer("0.10.0", "0.9.3"))
+        assertTrue(newer("0.3.3", "0.3.2"))
+        assertTrue(newer("1.0", "0.9.9"))
+        assertFalse(newer("0.3.2", "0.3.2"))
+        assertFalse(newer("0.3", "0.3.0"))
+        assertFalse(newer("0.3.1", "0.3.2"))
+    }
+}

@@ -82,6 +82,9 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
 
+        binding.rowCheckUpdates.setOnClickListener { com.bridg.update.UpdateChecker.check(this) }
+        binding.versionText.text = packageManager.getPackageInfo(packageName, 0).versionName
+
         binding.btnPair.setOnClickListener {
             startActivity(Intent(this, PairingActivity::class.java))
         }
@@ -109,7 +112,8 @@ class MainActivity : AppCompatActivity() {
         startForegroundService(serviceIntent)
         bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
 
-        handleShare(intent)
+        // A recreate (rotation) redelivers the same share intent; don't send twice.
+        if (savedInstanceState == null) handleShare(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -150,11 +154,9 @@ class MainActivity : AppCompatActivity() {
     private fun sendUris(uris: List<android.net.Uri>) {
         if (uris.isEmpty()) return
 
-        if (bridgService?.isConnected() != true) {
-            Toast.makeText(this, getString(R.string.connect_first), Toast.LENGTH_SHORT).show()
-            return
-        }
-
+        // No connected check here: a share usually cold-starts this activity,
+        // before the service has even bound, so the old gate dropped every
+        // shared file. BridgService queues until the Mac session is up.
         for (uri in uris) {
             // Best-effort: hold the read grant past this call. BridgService
             // opens the Uri moments later on its own thread, and a transient

@@ -76,6 +76,12 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
     @Volatile private var sessionSalt: ByteArray? = null
     @Volatile private var connected = false
 
+    /** True once the session key is set; before that BridgSocket drops everything. */
+    @Volatile private var sessionReady = false
+
+    /** Files shared while the Mac session wasn't up yet; flushed by [onSessionReady]. */
+    private val pendingShares = java.util.Collections.synchronizedList(mutableListOf<android.net.Uri>())
+
     /** Last reported send percentage, so progress doesn't respam the notification. */
     @Volatile private var lastSendPercent = -1
 
@@ -178,7 +184,7 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
             }
             ACTION_SEND_FILE -> {
                 val uri = intent.getStringExtra(EXTRA_FILE_URI)
-                if (uri != null) sendUri(android.net.Uri.parse(uri))
+                if (uri != null) queueOrSend(android.net.Uri.parse(uri))
                 else intent.getStringExtra(EXTRA_FILE_PATH)?.let { sendFile(it) }
             }
             ACTION_DISCONNECT -> bridgSocket.disconnect()
@@ -585,6 +591,26 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
      * the app's own storage can be opened as a raw `File` under scoped storage,
      * so [sendFile] could never have served the share path.
      */
+    private fun queueOrSend(uri: android.net.Uri) {
+        if (sessionReady) return sendUri(uri)
+        pendingShares.add(uri)
+        updateStatus("${pendingShares.size} file(s) waiting for your Mac…")
+    }
+
+    /**
+     * The session key is set: sealed frames can flow. Sends anything shared
+     * while we were still connecting. Off the receive thread, because the
+     * file sender's blocking enqueue must not stall the socket reader.
+     *
+     * ponytail: the share's read grant can lapse if the user leaves the share
+     * target long before the Mac shows up; copy to cacheDir if that bites.
+     */
+    private fun onSessionReady() {
+        sessionReady = true
+        val queued = synchronized(pendingShares) { pendingShares.toList().also { pendingShares.clear() } }
+        if (queued.isNotEmpty()) scope.launch { queued.forEach { sendUri(it) } }
+    }
+
     private fun sendUri(uri: android.net.Uri) {
         var name = uri.lastPathSegment?.substringAfterLast('/') ?: "file"
         var size = 0L
@@ -704,6 +730,7 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
                 pairingManager.completePairing(peerKey, envelope.pairResponse.deviceName)
                 pendingPairing = null
                 bridgSocket.setEncryptionKey(sessionKey)
+                onSessionReady()
                 batteryMonitor.resend()
                 // The listener may have bound after the service started; this
                 // also re-sends ringing calls and media state, now sealed.
@@ -721,6 +748,7 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
                 val peerKey = keyManager.getPairedPeerPublicKey() ?: return
                 val sessionKey = sessionKeyFor(peerKey, envelope.pairResumeAck.sessionSalt) ?: return
                 bridgSocket.setEncryptionKey(sessionKey)
+                onSessionReady()
                 batteryMonitor.resend()
                 // The listener may have bound after the service started; this
                 // also re-sends ringing calls and media state, now sealed.
@@ -853,6 +881,7 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
 
     override fun onDisconnected() {
         connected = false
+        sessionReady = false
         sessionSalt = null
         bridgSocket.clearEncryption()
         updateStatus("Disconnected — searching…")
@@ -888,6 +917,7 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
 
     override fun onConnectionLost(error: Exception) {
         connected = false
+        sessionReady = false
         sessionSalt = null
         bridgSocket.clearEncryption()
         Log.e(TAG, "Connection lost: ${error.message}")

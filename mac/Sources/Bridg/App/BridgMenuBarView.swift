@@ -77,6 +77,10 @@ struct BridgMenuBarView: View {
 
             settingsButton
 
+            Button(action: { Task { await UpdateChecker.check() } }) {
+                Label("Check for Updates…", systemImage: "arrow.down.circle")
+            }
+
             Divider()
 
             Button("Quit Bridg") {
