@@ -97,6 +97,8 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="14dp"
+                android:paddingVertical="4dp"
+                android:background="?attr/selectableItemBackground"
                 android:text="@string/paired_none"
                 android:textSize="15sp"
                 android:textColor="@color/label_secondary" />

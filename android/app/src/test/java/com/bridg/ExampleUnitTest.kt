@@ -330,3 +330,18 @@ class HubTagTest {
         assertEquals("630dcd2966c43366", com.bridg.pairing.KeyManager.hubTag(key))
     }
 }
+
+/**
+ * A computer answering at another's old address accepted the resume and then
+ * failed the first sealed frame; with an immediate redial the phone looped
+ * ~1,000 times in 15 minutes. Failures back off; a working session resets it.
+ */
+class RetryBackoffTest {
+    private fun delay(n: Int) = com.bridg.service.BridgService.retryDelayMs(n)
+
+    @Test
+    fun doublesFromFiveSecondsAndCapsAtAMinute() {
+        assertEquals(listOf(5_000L, 5_000L, 10_000L, 20_000L, 40_000L, 60_000L, 60_000L),
+            listOf(0, 1, 2, 3, 4, 5, 50).map(::delay))
+    }
+}

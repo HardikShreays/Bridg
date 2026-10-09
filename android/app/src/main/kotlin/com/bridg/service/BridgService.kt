@@ -190,6 +190,16 @@ class BridgService : Service() {
 
     fun pairedDeviceCount(): Int = keyManager.getPairedDevices().size
 
+    /** Unpair a computer: drop its link and its stored key. */
+    fun forget(deviceId: String) {
+        links.values.firstOrNull { it.deviceId == deviceId }?.let { link ->
+            links.remove(link.tag)
+            link.close()
+        }
+        keyManager.removePairedDevice(deviceId)
+        updateStatus(connectionSummary())
+    }
+
     fun deviceName(): String = keyManager.getDeviceName()
 
     private fun startService() {
@@ -820,6 +830,9 @@ class BridgService : Service() {
         /** The one pending redial after a failed connect; see [scheduleRetry]. */
         private var retryJob: Job? = null
 
+        /** Dials and sessions that failed in a row; sets the backoff. */
+        @Volatile private var failures = 0
+
         /** Files shared to this computer before its session was up; flushed by [onReady]. */
         val pendingShares: MutableList<android.net.Uri> =
             java.util.Collections.synchronizedList(mutableListOf())
@@ -834,8 +847,16 @@ class BridgService : Service() {
          * discovery finds nothing at all. The QR code carries the address for
          * exactly this reason, and we keep using it on later reconnects.
          */
-        fun dial(host: String? = pairing?.host?.ifEmpty { null } ?: deviceId?.let { keyManager.getHost(it) },
-                 port: Int = DEFAULT_PORT) {
+        fun dial(host: String? = knownHost(), port: Int = DEFAULT_PORT) {
+            // While backing off, discovery and known-host dials wait for the retry.
+            if (retryJob?.isActive == true) return
+            connect(host, port)
+        }
+
+        private fun knownHost(): String? =
+            pairing?.host?.ifEmpty { null } ?: deviceId?.let { keyManager.getHost(it) }
+
+        private fun connect(host: String?, port: Int) {
             if (connected || host == null) return
             scope.launch {
                 if (!connected) {
@@ -905,7 +926,13 @@ class BridgService : Service() {
                     onReady(sessionKey)
                 }
 
-                else -> handleIncomingEnvelope(this, envelope)
+                else -> {
+                    // A frame that opened under the session key: this really is
+                    // the computer we paired with. Being "ready" is not proof —
+                    // a different computer at this address acks the resume too.
+                    failures = 0
+                    handleIncomingEnvelope(this, envelope)
+                }
             }
         }
 
@@ -971,34 +998,36 @@ class BridgService : Service() {
 
         override fun onConnectionFailed(error: Exception) {
             connected = false
+            failures++
             Log.e(TAG, "Dialling $name failed: ${error.message}")
             scheduleRetry()
         }
 
         override fun onConnectionLost(error: Exception) {
             reset()
+            failures++
             Log.e(TAG, "Lost $name: ${error.message}")
             updateStatus(connectionSummary())
+            scheduleRetry()
             restartDiscovery()
         }
 
         /**
-         * Redial the known host after a failed connect.
+         * Redial after a failed dial or a lost session, backing off 5 s, 10 s,
+         * 20 s, 40 s, then every 60 s until a session comes up again.
          *
-         * A refused dial — the computer's app quitting or relaunching, the
-         * computer waking up — was otherwise the end of it: Bonjour does not
-         * report a service it has already found. Known-host and discovery dials
-         * often fail together; cancelling first keeps it to one pending retry.
-         *
-         * ponytail: fixed delay, no backoff. With a computer off this network
-         * that is a dial every ~15 s (10 s connect timeout + delay) per computer;
-         * add backoff if it shows up in battery use.
+         * A refused dial — the computer's app quitting, the computer waking up —
+         * was otherwise the end of it: Bonjour does not report a service it has
+         * already found. And the redial used to be immediate: when a different
+         * computer answered at this one's old address (a DHCP shuffle, or the
+         * Windows and Mac apps on one machine), it accepted the resume, the first
+         * sealed frame failed, and the phone redialled ~1,000 times in 15 minutes.
          */
         private fun scheduleRetry() {
             retryJob?.cancel()
             retryJob = scope.launch {
-                delay(RETRY_DELAY_MS)
-                if (isServiceRunning && !connected) dial()
+                delay(retryDelayMs(failures))
+                if (isServiceRunning && !connected) connect(knownHost(), DEFAULT_PORT)
             }
         }
     }
@@ -1019,6 +1048,11 @@ class BridgService : Service() {
         private const val TAG = "BridgService"
         private const val NOTIFICATION_ID = 1
         private const val RETRY_DELAY_MS = 5_000L
+        private const val MAX_RETRY_DELAY_MS = 60_000L
+
+        /** 5 s after the first failure, doubling, capped at 60 s. */
+        fun retryDelayMs(failures: Int): Long =
+            minOf(RETRY_DELAY_MS shl (failures - 1).coerceIn(0, 4), MAX_RETRY_DELAY_MS)
 
         /** Same pattern as [BridgNotificationListenerService.instance]: lets an
          *  independently-lifecycled system service find us without a bind. */

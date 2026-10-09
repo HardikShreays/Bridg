@@ -85,6 +85,9 @@ class MainActivity : AppCompatActivity() {
         binding.rowCheckUpdates.setOnClickListener { com.bridg.update.UpdateChecker.check(this) }
         binding.versionText.text = packageManager.getPackageInfo(packageName, 0).versionName
 
+        // Tap the "N computers paired" line to forget one.
+        binding.pairedCountText.setOnClickListener { forgetComputer() }
+
         binding.btnPair.setOnClickListener {
             startActivity(Intent(this, PairingActivity::class.java))
         }
@@ -187,6 +190,26 @@ class MainActivity : AppCompatActivity() {
             })
         }
         Toast.makeText(this, "Sending ${uris.size} file(s) to ${hubName?.ifEmpty { null } ?: "your computer"}", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun forgetComputer() {
+        val hubs = keyManager.getPairedDevices().entries.sortedBy { it.value.name }
+        if (hubs.isEmpty()) return
+        AlertDialog.Builder(this)
+            .setTitle("Forget a computer")
+            .setItems(hubs.map { it.value.name.ifEmpty { "Computer" } }.toTypedArray()) { _, which ->
+                val (id, hub) = hubs[which]
+                AlertDialog.Builder(this)
+                    .setMessage("Forget ${hub.name}? To use it again, scan its QR code.")
+                    .setPositiveButton("Forget") { _, _ ->
+                        bridgService?.forget(id) ?: keyManager.removePairedDevice(id)
+                        updateUI()
+                    }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     override fun onDestroy() {
@@ -307,8 +330,8 @@ class MainActivity : AppCompatActivity() {
         val paired = keyManager.getPairedDevices().size
         binding.pairedCountText.text = when (paired) {
             0 -> getString(R.string.paired_none)
-            1 -> "1 computer paired"
-            else -> "$paired computers paired"
+            1 -> "1 computer paired  ›"
+            else -> "$paired computers paired  ›"
         }
 
         bridgService?.let { binding.statusText.text = it.statusText }
