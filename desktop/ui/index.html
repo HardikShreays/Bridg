@@ -70,6 +70,7 @@
   .bar { height: 4px; border-radius: 2px; background: var(--field); overflow: hidden; margin-top: 6px; }
   .bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); }
   .error { color: var(--red); }
+  .dev-row + .dev-row { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
   .pair { text-align: center; }
   .pair .qr { background: #fff; border-radius: 12px; padding: 12px; display: inline-block; margin: 12px 0; }
   .pair .qr svg { display: block; width: 240px; height: 240px; }
@@ -99,6 +100,8 @@
   <section>
     <h2>Phones</h2>
     <div id="phones"></div>
+    <h2 style="margin-top:22px">Devices</h2>
+    <div class="card" id="devices"></div>
     <div class="card pair" id="pairCard" hidden>
       <div class="name">Scan with Bridg on your phone</div>
       <div class="muted">Open Bridg on Android → Pair a new computer</div>
@@ -165,6 +168,7 @@
         el("span", { class: "name ellipsis", text: p.name }),
         el("span", { class: "grow", style: "flex:1" }),
         el("span", { class: "muted", text: p.connected ? battery : "Not connected" })));
+      card.append(el("div", { class: "muted", style: "margin-top:2px", text: p.details }));
 
       if (p.connected) {
         if (p.playing) {
@@ -192,6 +196,28 @@
       box.append(card);
     }
     $("dropTarget").textContent = t ? t.name : "your phone (none connected)";
+    renderDevices();
+  }
+
+  // This computer, then what the connected phones report beyond it.
+  function renderDevices() {
+    const box = $("devices");
+    const row = (name, status, details, on) => el("div", { class: "dev-row" },
+      el("div", { class: "row" }, el("span", { class: "dot" + (on ? " on" : "") }), el("span", { class: "name ellipsis", text: name })),
+      el("div", { class: "muted", text: status }),
+      details ? el("div", { class: "muted", text: details }) : null);
+    const me = state.this_device || {};
+    box.replaceChildren(row(me.name || state.name, "This computer", me.details, true));
+    const others = state.ecosystem || [];
+    if (others.length) {
+      box.append(el("div", { class: "muted", style: "margin:14px 0 2px;text-transform:uppercase;letter-spacing:.06em;font-size:11px", text: "Also in your ecosystem" }));
+      for (const d of others) {
+        const status = d.status + (d.battery != null ? ` · ${d.battery}%` : "");
+        box.append(row(d.name, status, d.details, d.connected));
+      }
+    } else {
+      box.append(el("div", { class: "muted", style: "margin-top:12px", text: "Your phones' other computers show up here once they connect." }));
+    }
   }
 
   function unpair(p) {
@@ -215,7 +241,7 @@
     document.querySelector(`[data-id="${CSS.escape(n.id)}"]`)?.remove();
     const item = el("div", { class: "notif", "data-id": n.id });
     item.append(el("div", {},
-      el("div", { class: "app", text: `${n.app} · ${new Date(n.time || Date.now()).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` }),
+      el("div", { class: "app", text: [n.app, state.phones.length > 1 ? n.device_name : null, new Date(n.time || Date.now()).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })].filter(Boolean).join(" · ") }),
       n.title ? el("div", { class: "title", text: n.title }) : null,
       n.text ? el("div", { class: "text", text: n.text }) : null));
     item.append(el("button", { class: "x", "aria-label": "Dismiss", onclick: () => { invoke("dismiss", { id: n.id }); item.remove(); refreshEmpty(); } }, "✕"));

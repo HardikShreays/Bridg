@@ -22,6 +22,8 @@ struct BridgMenuBarView: View {
                     .font(.headline)
             }
 
+            PhonePicker()
+
             if let device = appState.pairedDeviceName {
                 HStack {
                     Image(systemName: "iphone")

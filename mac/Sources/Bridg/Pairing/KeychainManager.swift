@@ -14,6 +14,10 @@ class KeychainManager {
         self.service = service
     }
 
+    /// The real app keeps its list under "paired_devices"; a test keychain gets
+    /// its own, so tests never touch the running app's pairings.
+    private var devicesKey: String { service == "com.bridg" ? "paired_devices" : "paired_devices.\(service)" }
+
     // MARK: - Key Pair Management
 
     /// Generate a new X25519 keypair and persist the private key in Keychain.
@@ -91,7 +95,7 @@ class KeychainManager {
             kSecAttrService as String: service,
             kSecAttrAccount as String: "privateKey",
         ] as CFDictionary)
-        UserDefaults.standard.removeObject(forKey: "paired_devices")
+        UserDefaults.standard.removeObject(forKey: devicesKey)
     }
 
     /// Get the stored public key by re-deriving from the stored private key.
@@ -154,22 +158,29 @@ class KeychainManager {
 
     // MARK: - Paired Device Storage
 
-    /// Store a paired device's public key and name.
-    func savePairedDevice(name: String, publicKey: Data) {
-        let defaults = UserDefaults.standard
+    /// Store a paired phone and return it. Re-pairing the same phone (same key)
+    /// keeps its id instead of adding a twin that would show up twice.
+    @discardableResult
+    func savePairedDevice(name: String, publicKey: Data) -> PairedDeviceInfo {
         var devices = getPairedDevices()
-        let deviceId = UUID().uuidString
-
-        devices.append(PairedDeviceInfo(id: deviceId, name: name, publicKey: publicKey))
-        if let data = try? JSONEncoder().encode(devices) {
-            defaults.set(data, forKey: "paired_devices")
+        let device: PairedDeviceInfo
+        if let i = devices.firstIndex(where: { $0.publicKey == publicKey }) {
+            device = PairedDeviceInfo(id: devices[i].id, name: name, publicKey: publicKey)
+            devices[i] = device
+        } else {
+            device = PairedDeviceInfo(id: UUID().uuidString, name: name, publicKey: publicKey)
+            devices.append(device)
         }
+        if let data = try? JSONEncoder().encode(devices) {
+            UserDefaults.standard.set(data, forKey: devicesKey)
+        }
+        return device
     }
 
     /// Get all paired devices.
     func getPairedDevices() -> [PairedDeviceInfo] {
         let defaults = UserDefaults.standard
-        guard let data = defaults.data(forKey: "paired_devices"),
+        guard let data = defaults.data(forKey: devicesKey),
               let devices = try? JSONDecoder().decode([PairedDeviceInfo].self, from: data) else {
             return []
         }
@@ -186,7 +197,7 @@ class KeychainManager {
         var devices = getPairedDevices()
         devices.removeAll { $0.id == id }
         if let data = try? JSONEncoder().encode(devices) {
-            UserDefaults.standard.set(data, forKey: "paired_devices")
+            UserDefaults.standard.set(data, forKey: devicesKey)
         }
     }
 

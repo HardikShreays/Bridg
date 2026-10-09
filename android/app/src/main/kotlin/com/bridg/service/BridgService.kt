@@ -190,6 +190,56 @@ class BridgService : Service() {
 
     fun pairedDeviceCount(): Int = keyManager.getPairedDevices().size
 
+    /** One line in the Devices section. */
+    data class DeviceRow(val info: DeviceInfo, val status: String, val connected: Boolean, val battery: Int = -1)
+
+    /**
+     * The whole ecosystem as this phone sees it: itself, the computers it
+     * links to, and — one hop out — the other phones those computers report.
+     */
+    fun ecosystem(): Triple<DeviceInfo, List<DeviceRow>, List<DeviceRow>> {
+        val computers = links.values.sortedBy { it.name }.map {
+            DeviceRow(it.describe(), if (it.ready) "Connected" else "Not connected", it.ready)
+        }
+        val known = links.keys + selfInfo.id
+        val others = mutableMapOf<String, DeviceRow>()
+        for (link in links.values.filter { it.ready }) {
+            for (peer in link.peers) {
+                val id = peer.info.id
+                if (id.isEmpty() || id in known) continue
+                if (others[id]?.connected == true) continue
+                others[id] = DeviceRow(
+                    peer.info,
+                    if (peer.connected) "Connected to ${link.name}" else "Paired with ${link.name}, offline",
+                    peer.connected,
+                    peer.batteryPercent
+                )
+            }
+        }
+        return Triple(selfInfo, computers, others.values.sortedBy { it.info.name })
+    }
+
+    /** Who this phone is, for the computers' Devices screens. */
+    private val selfInfo: DeviceInfo by lazy {
+        DeviceInfo.newBuilder()
+            .setId(KeyManager.hubTag(keyManager.getOrCreatePublicKey()))
+            .setName(keyManager.getDeviceName())
+            .setPlatform(DeviceInfo.Platform.ANDROID)
+            .setAppVersion(packageManager.getPackageInfo(packageName, 0).versionName ?: "")
+            .setOsVersion("Android ${Build.VERSION.RELEASE}")
+            .setModel("${Build.MANUFACTURER} ${Build.MODEL}")
+            .build()
+    }
+
+    /** Tell every computer which computers this phone is linked to. */
+    private fun sharePeers() {
+        val list = Peers.newBuilder().addAllPeers(links.values.map {
+            Peer.newBuilder().setInfo(it.describe()).setConnected(it.ready).setBatteryPercent(-1).build()
+        }).build()
+        broadcast(Envelope.newBuilder().setPeers(list).build())
+        onStatusChanged?.invoke(statusText)
+    }
+
     /** Unpair a computer: drop its link and its stored key. */
     fun forget(deviceId: String) {
         links.values.firstOrNull { it.deviceId == deviceId }?.let { link ->
@@ -198,6 +248,7 @@ class BridgService : Service() {
         }
         keyManager.removePairedDevice(deviceId)
         updateStatus(connectionSummary())
+        sharePeers()
     }
 
     fun deviceName(): String = keyManager.getDeviceName()
@@ -680,6 +731,16 @@ class BridgService : Service() {
     /** Everything after the handshake, from [from]. Replies go back on the same link. */
     private fun handleIncomingEnvelope(from: HubLink, envelope: Envelope) {
         when (envelope.payloadCase) {
+            Envelope.PayloadCase.DEVICE_INFO -> {
+                from.info = envelope.deviceInfo
+                onStatusChanged?.invoke(statusText)
+            }
+
+            Envelope.PayloadCase.PEERS -> {
+                from.peers = envelope.peers.peersList
+                onStatusChanged?.invoke(statusText)
+            }
+
             Envelope.PayloadCase.REMOTE_ACTION -> remoteActions.handle(envelope.remoteAction)
 
             Envelope.PayloadCase.CLIPBOARD -> {
@@ -833,6 +894,17 @@ class BridgService : Service() {
         /** Dials and sessions that failed in a row; sets the backoff. */
         @Volatile private var failures = 0
 
+        /** What the computer says about itself; null from builds before 0.5. */
+        @Volatile var info: DeviceInfo? = null
+
+        /** The phones this computer is linked to, as it last reported. */
+        @Volatile var peers: List<Peer> = emptyList()
+
+        fun describe(): DeviceInfo = (info?.toBuilder() ?: DeviceInfo.newBuilder())
+            .setId(tag)
+            .setName(info?.name?.ifEmpty { null } ?: name)
+            .build()
+
         /** Files shared to this computer before its session was up; flushed by [onReady]. */
         val pendingShares: MutableList<android.net.Uri> =
             java.util.Collections.synchronizedList(mutableListOf())
@@ -968,6 +1040,9 @@ class BridgService : Service() {
             socket.setEncryptionKey(sessionKey)
             ready = true
             updateStatus(connectionSummary())
+            // Who we are, then who else we're linked to — for its Devices screen.
+            send(Envelope.newBuilder().setDeviceInfo(selfInfo).build())
+            sharePeers()
             val queued = synchronized(pendingShares) { pendingShares.toList().also { pendingShares.clear() } }
             if (queued.isNotEmpty()) scope.launch { queued.forEach { sendUri(this@HubLink, it) } }
             batteryMonitor.resend()
@@ -977,8 +1052,11 @@ class BridgService : Service() {
         }
 
         private fun reset() {
+            val wasReady = ready
             connected = false
             ready = false
+            peers = emptyList()
+            if (wasReady) sharePeers()
             sessionSalt = null
             socket.clearEncryption()
         }

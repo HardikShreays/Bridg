@@ -10,8 +10,11 @@ import CoreMedia
 /// why every feature looked dead.
 @MainActor
 final class AppState: ObservableObject {
-    @Published var connectionState: ConnectionState = .disconnected
-    @Published var pairedDeviceName: String?
+    /// Every paired phone, connected or not. Several can be connected at once.
+    @Published var phones: [PhoneState] = []
+    /// The phone the buttons act on (ring, open link, files, media). Nil means
+    /// "the first connected one".
+    @Published var selectedPhoneID: String?
     @Published var isScreenMirroring: Bool = false
     @Published var isClipboardSyncing: Bool = true
     @Published var isNotificationForwarding: Bool = true
@@ -20,11 +23,6 @@ final class AppState: ObservableObject {
     /// Aspect ratio of the incoming mirror stream, from its VideoStreamStart.
     @Published var mirrorAspectRatio: CGFloat = 9.0 / 16.0
     @Published var notificationHistory: [NotificationItem] = []
-    /// What the phone is playing right now, or nil when nothing is.
-    @Published var nowPlaying: MediaItem?
-
-    /// Phone battery, as last reported. Nil until the phone says.
-    @Published var phoneBattery: BatteryState?
     /// Outcome of the last click-to-call, shown under the dial field.
     @Published var dialStatus: String?
     /// True from Ring Phone until Stop Ringing or the phone's own cutoff.
@@ -52,12 +50,23 @@ final class AppState: ObservableObject {
     /// Where `MirrorView`'s display layers subscribe for decoded frames.
     nonisolated(unsafe) let videoSinks = VideoSinks()
 
+    /// The phone currently streaming its screen here; video from any other is
+    /// dropped (one decoder), and mirror input goes back to this one.
+    nonisolated(unsafe) private var mirroringPhoneID: String?
+
+    /// Which phone each outgoing transfer is going to, so a chunk never follows
+    /// a selection change to a different phone mid-file. The file sender
+    /// streams chunks from a background queue, hence the lock rather than the
+    /// main actor.
+    nonisolated(unsafe) private var transferTargets: [String: String] = [:]
+    nonisolated(unsafe) private var fileTarget: String?
+    nonisolated private let transferLock = NSLock()
+
     init() {
-        pairedDeviceName = keychainManager.getPairedDevices().first?.name
+        phones = keychainManager.getPairedDevices().map { PhoneState(device: $0) }
         wireConnection()
         wireFeatures()
         connectionManager.start()
-        connectionState = .discovering
 
         // Nothing paired yet means the only useful thing this app can show is
         // the QR code, so show it without making the user find a button first.
@@ -71,22 +80,88 @@ final class AppState: ObservableObject {
         let token = pairingManager.generatePairingToken()
         connectionManager.beginPairing(token: token)
         pairingQRCode = pairingManager.generateQRCode(from: pairingManager.createQrContent(token: token))
-        connectionState = .pairing
     }
 
-    func unpairAll() {
-        for device in keychainManager.getPairedDevices() {
-            keychainManager.removePairedDevice(id: device.id)
-        }
-        pairedDeviceName = nil
-        startPairing()
+    func cancelPairing() {
+        connectionManager.beginPairing(token: SharedSecretKDF.randomSalt().base64EncodedString())
+        pairingQRCode = nil
     }
 
-    var hasPairedDevice: Bool { keychainManager.getPairedDevicePublicKey() != nil }
+    func unpair(_ id: String) {
+        keychainManager.removePairedDevice(id: id)
+        connectionManager.disconnect(deviceID: id)
+        phones.removeAll { $0.id == id }
+        if selectedPhoneID == id { selectedPhoneID = nil }
+        if phones.isEmpty { startPairing() }
+    }
+
+    var hasPairedDevice: Bool { !phones.isEmpty }
+
+    // MARK: - Phones
+
+    /// The phone the window and menu bar show and act on.
+    var selectedPhone: PhoneState? {
+        phones.first { $0.id == selectedPhoneID } ?? phones.first { $0.connected } ?? phones.first
+    }
+
+    // What used to be stored for "the" phone now reads from the selected one,
+    // so every existing view keeps working with several phones.
+    var pairedDeviceName: String? { selectedPhone?.name }
+    var phoneBattery: BatteryState? { selectedPhone?.battery }
+    var nowPlaying: MediaItem? { selectedPhone?.nowPlaying }
+
+    var connectionState: ConnectionState {
+        if selectedPhone?.connected == true { return .connected }
+        if pairingQRCode != nil { return .pairing }
+        return phones.isEmpty ? .disconnected : .discovering
+    }
+
+    private func update(_ id: String, _ change: (inout PhoneState) -> Void) {
+        guard let i = phones.firstIndex(where: { $0.id == id }) else { return }
+        change(&phones[i])
+    }
+
+    /// Where a button's message goes: the selected phone, if it is connected.
+    private func sendToSelected(_ envelope: BridgProtoEnvelope) {
+        guard let phone = selectedPhone, phone.connected else { return }
+        connectionManager.send(envelope, to: phone.id)
+    }
+
+    /// Who this Mac is, for the phones' Devices screens.
+    static let selfInfo: BridgProtoDeviceInfo = {
+        var info = BridgProtoDeviceInfo()
+        info.id = ConnectionManager.hubTag(publicKey: KeychainManager().getOrCreatePublicKey())
+        info.name = ConnectionManager.deviceName
+        info.platform = .macos
+        info.appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        info.osVersion = "macOS \(v.majorVersion).\(v.minorVersion)"
+        var size = 0
+        sysctlbyname("hw.model", nil, &size, nil, 0)
+        var model = [CChar](repeating: 0, count: max(size, 1))
+        sysctlbyname("hw.model", &model, &size, nil, 0)
+        info.model = String(cString: model)
+        return info
+    }()
+
+    /// Tell every connected phone which phones this Mac has, so their Devices
+    /// screens can show each other.
+    private func sharePeers() {
+        var list = BridgProtoPeers()
+        list.peers = phones.map { $0.asPeer }
+        var envelope = BridgProtoEnvelope()
+        envelope.peers = list
+        connectionManager.broadcast(envelope)
+    }
 
     // MARK: - Outbound actions
 
+    /// Files go to the selected phone.
     func sendFiles(_ urls: [URL]) {
+        guard let phone = selectedPhone, phone.connected else { return }
+        transferLock.lock()
+        fileTarget = phone.id
+        transferLock.unlock()
         fileTransferManager.handleDroppedFiles(urls)
     }
 
@@ -169,12 +244,13 @@ final class AppState: ObservableObject {
     /// Send a typed reply to a phone notification (used by both the system
     /// notification's Reply button and the in-app Notifications list).
     func sendNotificationReply(id: String, text: String) {
+        guard let phone = notificationHistory.first(where: { $0.id == id })?.deviceID else { return }
         var action = BridgProtoNotificationAction()
         action.actionID = id
         action.label = text
         var envelope = BridgProtoEnvelope()
         envelope.notifAction = action
-        connectionManager.send(envelope)
+        connectionManager.send(envelope, to: phone)
     }
 
     /// Delete a notification here and on the phone.
@@ -182,14 +258,16 @@ final class AppState: ObservableObject {
     /// The id is the phone's own StatusBarNotification key, so this clears the
     /// exact notification the Mac was showing rather than a same-app sibling.
     func dismissNotification(id: String) {
+        let phone = notificationHistory.first(where: { $0.id == id })?.deviceID
         notificationHistory.removeAll { $0.id == id }
         notificationManager.dismissNotification(id: id)
 
+        guard let phone else { return }
         var dismiss = BridgProtoNotificationDismiss()
         dismiss.id = id
         var envelope = BridgProtoEnvelope()
         envelope.notifDismiss = dismiss
-        connectionManager.send(envelope)
+        connectionManager.send(envelope, to: phone)
     }
 
     /// Play/pause, next, previous on whatever the phone is playing.
@@ -198,7 +276,7 @@ final class AppState: ObservableObject {
         command.action = action
         var envelope = BridgProtoEnvelope()
         envelope.mediaCommand = command
-        connectionManager.send(envelope)
+        sendToSelected(envelope)
     }
 
     /// Put a string on the Mac clipboard (in-app "Copy Code" action).
@@ -221,7 +299,7 @@ final class AppState: ObservableObject {
         action.action = ring ? .ring : .stopRing
         var envelope = BridgProtoEnvelope()
         envelope.remoteAction = action
-        connectionManager.send(envelope)
+        sendToSelected(envelope)
 
         isRinging = ring
         ringReset?.cancel()
@@ -245,7 +323,7 @@ final class AppState: ObservableObject {
         action.url = url
         var envelope = BridgProtoEnvelope()
         envelope.remoteAction = action
-        connectionManager.send(envelope)
+        sendToSelected(envelope)
         return true
     }
 
@@ -270,12 +348,18 @@ final class AppState: ObservableObject {
 
     /// Answer / hang up / mute / speaker on the phone's current call.
     /// The incoming call itself surfaces as a normal forwarded notification.
+    /// Goes to the phone that is ringing — the newest call notification's —
+    /// falling back to the selected phone.
     func sendCallControl(_ action: BridgProtoCallControl.Action) {
         var control = BridgProtoCallControl()
         control.action = action
         var envelope = BridgProtoEnvelope()
         envelope.callControl = control
-        connectionManager.send(envelope)
+        if let phone = notificationHistory.first(where: { $0.isCall })?.deviceID {
+            connectionManager.send(envelope, to: phone)
+        } else {
+            sendToSelected(envelope)
+        }
     }
 
     /// Have the phone place a call. Goes over Bluetooth Hands-Free, not the
@@ -284,37 +368,61 @@ final class AppState: ObservableObject {
         phoneDialer.dial(number)
     }
 
+    /// Input belongs to the phone on the mirror, not whichever is selected.
     private func send(_ event: BridgProtoInputEvent) {
         var envelope = BridgProtoEnvelope()
         envelope.inputEvent = event
-        connectionManager.send(envelope)
+        if let phone = mirroringPhoneID {
+            connectionManager.send(envelope, to: phone)
+        } else {
+            sendToSelected(envelope)
+        }
     }
 
     // MARK: - Wiring
 
     private func wireConnection() {
-        connectionManager.onConnected = { [weak self] _ in
-            Task { @MainActor in self?.connectionState = .connected }
-        }
-
-        connectionManager.onDisconnected = { [weak self] in
-            self?.audioPlayer.stop()
+        connectionManager.onPhoneConnected = { [weak self] device in
             Task { @MainActor in
-                self?.connectionState = .discovering
-                self?.isScreenMirroring = false
-                self?.nowPlaying = nil
+                guard let self else { return }
+                if !self.phones.contains(where: { $0.id == device.id }) {
+                    self.phones.append(PhoneState(device: device))
+                }
+                self.update(device.id) { $0.connected = true; $0.name = device.name }
+                // Who we are, then who else is here — for the phone's Devices screen.
+                var hello = BridgProtoEnvelope()
+                hello.deviceInfo = Self.selfInfo
+                self.connectionManager.send(hello, to: device.id)
+                self.sharePeers()
             }
         }
 
-        connectionManager.onPaired = { [weak self] name in
+        connectionManager.onPhoneDisconnected = { [weak self] id in
+            guard let self else { return }
+            if self.mirroringPhoneID == id {
+                self.mirroringPhoneID = nil
+                self.audioPlayer.stop()
+                self.videoDecoder.reset()
+            }
             Task { @MainActor in
-                self?.pairedDeviceName = name
-                self?.pairingQRCode = nil
-                self?.connectionState = .connected
+                self.update(id) { $0.connected = false; $0.nowPlaying = nil; $0.peers = [] }
+                if self.mirroringPhoneID == nil { self.isScreenMirroring = false }
+                self.sharePeers()
             }
         }
 
-        connectionManager.onMessage = { [weak self] envelope in
+        connectionManager.onPaired = { [weak self] device in
+            Task { @MainActor in
+                guard let self else { return }
+                if !self.phones.contains(where: { $0.id == device.id }) {
+                    self.phones.append(PhoneState(device: device))
+                }
+                self.selectedPhoneID = device.id
+                self.pairingQRCode = nil
+            }
+        }
+
+        connectionManager.onMessage = { [weak self] envelope, phone in
             // FIFO, deliberately — not `Task { @MainActor in ... }`.
             //
             // An unstructured Task per envelope carries no ordering guarantee,
@@ -325,14 +433,21 @@ final class AppState: ObservableObject {
             // half-written file — "sometimes it works" being the tell.
             // DispatchQueue.main is FIFO, which is what this stream needs.
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.route(envelope) }
+                MainActor.assumeIsolated { self?.route(envelope, from: phone) }
             }
         }
 
         // Video arrives on the network queue and is decoded there; only the
         // published UI state hops to the main actor.
-        connectionManager.onVideoMessage = { [weak self] envelope in
+        connectionManager.onVideoMessage = { [weak self] envelope, phone in
             guard let self else { return }
+            // One decoder, one mirror: the first phone to start streaming owns
+            // it until it stops; the rest are dropped (the phone sends its
+            // screen to every computer it is connected to).
+            if case .videoStreamStart = envelope.payload, self.mirroringPhoneID == nil {
+                self.mirroringPhoneID = phone
+            }
+            guard self.mirroringPhoneID == phone else { return }
             switch envelope.payload {
             case .videoStreamStart(let start):
                 self.videoDecoder.configure(spsPps: start.spsPps)
@@ -355,6 +470,7 @@ final class AppState: ObservableObject {
                     channels: frame.channels
                 )
             case .videoStreamStop:
+                self.mirroringPhoneID = nil
                 self.videoDecoder.reset()
                 self.audioPlayer.stop()
                 Task { @MainActor in self.isScreenMirroring = false }
@@ -369,14 +485,27 @@ final class AppState: ObservableObject {
             guard let self, self.isClipboardSyncing else { return }
             var envelope = BridgProtoEnvelope()
             envelope.clipboard = update
-            self.connectionManager.send(envelope)
+            self.connectionManager.broadcast(envelope)
         }
         clipboardSync.startMonitoring()
 
         // The file manager pushes chunks itself; it just needed a way out.
         fileTransferManager.onSendEnvelope = { [weak self] envelope, sent in
             guard let self else { return sent?(false) ?? () }
-            self.connectionManager.send(envelope, sent: sent)
+            // Pin each transfer to the phone it started for.
+            let id: String
+            switch envelope.payload {
+            case .fileStart(let start): id = start.transferID
+            case .fileChunk(let chunk): id = chunk.transferID
+            case .fileCancel(let cancel): id = cancel.transferID
+            default: return sent?(false) ?? ()
+            }
+            self.transferLock.lock()
+            if case .fileStart = envelope.payload, let phone = self.fileTarget { self.transferTargets[id] = phone }
+            let target = self.transferTargets[id]
+            self.transferLock.unlock()
+            guard let target else { return sent?(false) ?? () }
+            self.connectionManager.send(envelope, to: target, sent: sent)
         }
         fileTransferManager.onTransferStarted = { [weak self] id, filename, size, isOutgoing in
             Task { @MainActor in
@@ -430,13 +559,22 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Route a decoded message to the feature that owns it.
-    private func route(_ envelope: BridgProtoEnvelope) {
+    /// Route a decoded message from `phone` to the feature that owns it.
+    private func route(_ envelope: BridgProtoEnvelope, from phone: String) {
         switch envelope.payload {
         case .clipboard(let update):
             guard isClipboardSyncing else { return }
             clipboardSync.handleRemoteClipboard(update)
             lastClipboardContent = update.imageData.isEmpty ? update.content : "[Image]"
+            // Copy on one phone, paste on the other; origin_id rides along so
+            // nobody applies their own clip back.
+            connectionManager.broadcast(envelope, except: phone)
+
+        case .deviceInfo(let info):
+            update(phone) { $0.info = info }
+
+        case .peers(let list):
+            update(phone) { $0.peers = list.peers }
 
         case .notification(let event):
             guard isNotificationForwarding else { return }
@@ -450,7 +588,8 @@ final class AppState: ObservableObject {
                     text: event.text,
                     timestamp: Date(timeIntervalSince1970: Double(event.timestamp) / 1000),
                     hasReplyAction: event.hasReplyAction_p,
-                    isCall: event.isCall
+                    isCall: event.isCall,
+                    deviceID: phone
                 ),
                 at: 0
             )
@@ -460,14 +599,17 @@ final class AppState: ObservableObject {
             notificationHistory.removeAll { $0.id == dismiss.id }
 
         case .deviceStatus(let status):
-            phoneBattery = BatteryState(
-                percent: Int(status.batteryPercent),
-                isCharging: status.charging,
-                isLow: status.batteryLow
-            )
+            update(phone) {
+                $0.battery = BatteryState(
+                    percent: Int(status.batteryPercent),
+                    isCharging: status.charging,
+                    isLow: status.batteryLow
+                )
+            }
+            sharePeers()
 
         case .mediaState(let state):
-            nowPlaying = state.active
+            let playing: MediaItem? = state.active
                 ? MediaItem(
                     appLabel: state.appLabel,
                     title: state.title,
@@ -475,6 +617,7 @@ final class AppState: ObservableObject {
                     isPlaying: state.playing
                 )
                 : nil
+            update(phone) { $0.nowPlaying = playing }
 
         case .fileStart(let start):
             fileTransferManager.handleTransferStart(start)
@@ -482,13 +625,46 @@ final class AppState: ObservableObject {
         case .fileChunk(let chunk):
             var ack = BridgProtoEnvelope()
             ack.fileAck = fileTransferManager.handleFileChunk(chunk)
-            connectionManager.send(ack)
+            connectionManager.send(ack, to: phone)
 
         case .fileAck(let ack):
             fileTransferManager.handleAck(ack)
 
         default:
             print("Unhandled message: \(String(describing: envelope.payload))")
+        }
+    }
+
+    struct PhoneState: Identifiable {
+        let id: String
+        var name: String
+        /// Same id the phone's own app and every other computer use for it.
+        let tag: String
+        var connected = false
+        var battery: BatteryState?
+        var nowPlaying: MediaItem?
+        /// What the phone says about itself; nil from phone builds before 0.5.
+        var info: BridgProtoDeviceInfo?
+        /// The computers this phone is linked to, as it last reported.
+        var peers: [BridgProtoPeer] = []
+
+        init(device: KeychainManager.PairedDeviceInfo) {
+            id = device.id
+            name = device.name
+            tag = ConnectionManager.hubTag(publicKey: device.publicKey)
+        }
+
+        var asPeer: BridgProtoPeer {
+            var peer = BridgProtoPeer()
+            var info = self.info ?? BridgProtoDeviceInfo()
+            if info.id.isEmpty { info.id = tag }
+            if info.name.isEmpty { info.name = name }
+            if info.platform == .unspecified { info.platform = .android }
+            peer.info = info
+            peer.connected = connected
+            peer.batteryPercent = Int32(battery?.percent ?? -1)
+            peer.charging = battery?.isCharging ?? false
+            return peer
         }
     }
 
@@ -520,6 +696,8 @@ struct NotificationItem: Identifiable {
     let timestamp: Date
     let hasReplyAction: Bool
     let isCall: Bool
+    /// The phone it came from; replies and dismissals go back there.
+    let deviceID: String
 }
 
 struct BatteryState: Equatable {

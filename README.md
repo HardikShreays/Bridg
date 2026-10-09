@@ -9,7 +9,8 @@ Built on proven capture approaches (inspired by scrcpy) with a custom protobuf-b
 ## Features
 
 - **Pairing**: One-time QR code pairing with X25519 key exchange, auto-reconnect
-- **Several computers**: One phone stays connected to a Mac and a Windows PC at once; notifications and clipboard reach all of them, and a copy on one computer can be pasted on the other
+- **Several computers, several phones**: One phone stays connected to a Mac and a Windows PC at once, and a computer takes several phones at once; notifications and clipboard reach all of them, and a copy on one device can be pasted on another
+- **Devices**: Every app shows the whole ecosystem: this device, its links, and the devices those report (platform, OS, model, app version, battery)
 - **File Transfer**: Drag-and-drop files between devices, SHA-256 verified
 - **Notifications**: Phone notifications appear natively on Mac, with reply support
 - **Clipboard Sync**: Copy on one device, paste on the other

@@ -243,6 +243,36 @@ Mac (mirror window)                 Android (AccessibilityService)
   │   via AccessibilityService]        │
 ```
 
+### Ecosystem: DeviceInfo and Peers
+
+```
+Phone                               Computer (Mac / Windows)
+  │                                    │
+  │<──── DeviceInfo ──────────────────│  (first sealed frames, both ways)
+  │───── DeviceInfo ─────────────────>│
+  │     {id, name, platform,           │
+  │      app_version, os_version,      │
+  │      model}                        │
+  │                                    │
+  │<──── Peers ───────────────────────│  (on connect and on any change)
+  │───── Peers ──────────────────────>│
+  │     {[DeviceInfo, connected,       │
+  │       battery_percent, charging]}  │
+```
+
+`DeviceInfo.id` is the device's **hub tag** — hex of the first 8 bytes of
+SHA-256 of its X25519 public key — so every app derives the same id for a
+device and lists from different peers merge without duplicates.
+
+`Peers` lists only the sender's **direct** links. A receiver shows them one hop
+out ("Also in your ecosystem") and never forwards them, so nothing can
+circulate or go stale. Phones link to every computer, so one hop is enough for
+the phone to see every other phone on its computers, and for a Mac to see the
+Windows PC the same phone is linked to.
+
+Both are optional: apps before 0.5 send neither, and receivers fall back to
+the name from the handshake.
+
 ### Device Status
 
 ```

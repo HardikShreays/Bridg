@@ -27,8 +27,12 @@ struct ContentView: View {
                             .foregroundColor(appState.connectionState.isConnected ? .green : .secondary)
                     }
 
-                    if let deviceName = appState.pairedDeviceName {
-                        Label(deviceName, systemImage: "iphone")
+                    NavigationLink {
+                        DevicesView()
+                            .environmentObject(appState)
+                    } label: {
+                        Label("Devices", systemImage: "laptopcomputer.and.iphone")
+                            .badge(appState.phones.filter(\.connected).count)
                     }
                 }
 
@@ -109,6 +113,15 @@ struct HomeDetailView: View {
                 .font(.title3)
                 .foregroundColor(.secondary)
 
+            PhonePicker()
+                .environmentObject(appState)
+                .frame(maxWidth: 320)
+
+            if let qr = appState.pairingQRCode, appState.connectionState.isConnected {
+                PairingQRView(qr: qr)
+                    .environmentObject(appState)
+            }
+
             if appState.connectionState.isConnected {
                 HStack(spacing: 30) {
                     FeatureCard(
@@ -140,15 +153,9 @@ struct HomeDetailView: View {
                         .frame(maxWidth: 520)
                 }
             } else if let qr = appState.pairingQRCode {
-                Image(nsImage: qr)
-                    .resizable()
-                    .interpolation(.none)
-                    .aspectRatio(1, contentMode: .fit)
-                    .frame(width: 300, height: 300)
-                Text("Open Bridg on your phone and tap \"Pair New Device\"")
-                    .font(.callout)
-                    .foregroundColor(.secondary)
-            } else {
+                PairingQRView(qr: qr)
+                    .environmentObject(appState)
+            } else if !appState.hasPairedDevice {
                 Button("Start Pairing") {
                     appState.startPairing()
                 }
@@ -375,20 +382,20 @@ struct ConnectionView: View {
                         .foregroundColor(.secondary)
                 }
                 HStack {
-                    Text("Paired Phone")
+                    Text("Phone")
                     Spacer()
-                    Text(appState.pairedDeviceName ?? "None")
-                        .foregroundColor(.secondary)
+                    PhonePicker()
+                        .environmentObject(appState)
+                        .frame(maxWidth: 240)
                 }
             }
 
             Section {
-                if !appState.connectionState.isConnected {
-                    Button("Show Pairing QR Code") { appState.startPairing() }
+                Button(appState.hasPairedDevice ? "Pair Another Phone" : "Show Pairing QR Code") { appState.startPairing() }
+                if let phone = appState.selectedPhone {
+                    Button("Unpair \(phone.name)") { appState.unpair(phone.id) }
+                        .foregroundColor(.red)
                 }
-                Button("Unpair Device") { appState.unpairAll() }
-                    .disabled(appState.pairedDeviceName == nil)
-                    .foregroundColor(.red)
             }
 
             Section {
@@ -411,7 +418,7 @@ struct ConnectionView: View {
                                 .interpolation(.none)
                                 .aspectRatio(1, contentMode: .fit)
                                 .frame(width: 200, height: 200)
-                            Text("Open Bridg on your phone and tap \"Pair New Device\"")
+                            Text("Open Bridg on your phone and tap \"Pair a new computer\"")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
@@ -516,5 +523,188 @@ struct PhoneActionsView: View {
             }
         }
         .onAppear { copiedLink = AppState.urlOnPasteboard() }
+    }
+}
+
+/// Which phone the buttons act on. Shown only once there is a choice.
+struct PhonePicker: View {
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        if appState.phones.count > 1 {
+            Picker("Phone", selection: Binding(
+                get: { appState.selectedPhone?.id ?? "" },
+                set: { appState.selectedPhoneID = $0 }
+            )) {
+                ForEach(appState.phones) { phone in
+                    Text(phone.connected ? phone.name : "\(phone.name) (offline)").tag(phone.id)
+                }
+            }
+            .labelsHidden()
+        }
+    }
+}
+
+struct PairingQRView: View {
+    @EnvironmentObject var appState: AppState
+    let qr: NSImage
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(nsImage: qr)
+                .resizable()
+                .interpolation(.none)
+                .aspectRatio(1, contentMode: .fit)
+                .frame(width: 260, height: 260)
+            Text("Open Bridg on your phone and tap \"Pair a new computer\"")
+                .font(.callout)
+                .foregroundColor(.secondary)
+            if appState.hasPairedDevice {
+                Button("Cancel") { appState.cancelPairing() }
+            }
+        }
+    }
+}
+
+/// Every device in the ecosystem: this Mac, its phones, and what those phones
+/// report being linked to (the Windows PC, another Mac).
+struct DevicesView: View {
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        Form {
+            Section("This Mac") {
+                DeviceRow(info: AppState.selfInfo, status: "This device")
+            }
+
+            Section("Phones") {
+                if appState.phones.isEmpty {
+                    Text("No phone paired yet").foregroundColor(.secondary)
+                }
+                ForEach(appState.phones) { phone in
+                    HStack(alignment: .top) {
+                        DeviceRow(
+                            info: phone.asPeer.info,
+                            status: phone.connected ? "Connected" : "Not connected",
+                            connected: phone.connected,
+                            battery: phone.battery
+                        )
+                        Spacer()
+                        if appState.phones.count > 1 {
+                            Button("Use") { appState.selectedPhoneID = phone.id }
+                                .disabled(appState.selectedPhone?.id == phone.id)
+                        }
+                        Button("Unpair") { appState.unpair(phone.id) }
+                            .foregroundColor(.red)
+                    }
+                }
+                Button("Pair Another Phone") { appState.startPairing() }
+            }
+
+            let others = ecosystem
+            if !others.isEmpty {
+                Section {
+                    ForEach(others, id: \.peer.info.id) { entry in
+                        DeviceRow(
+                            info: entry.peer.info,
+                            status: entry.peer.connected ? "Connected to \(entry.via)" : "Paired with \(entry.via), offline",
+                            connected: entry.peer.connected,
+                            battery: entry.peer.batteryPercent >= 0
+                                ? BatteryState(percent: Int(entry.peer.batteryPercent), isCharging: entry.peer.charging, isLow: false)
+                                : nil
+                        )
+                    }
+                } header: {
+                    Text("Also in your ecosystem")
+                } footer: {
+                    Text("Reported by your phones. Pair them with this Mac to use them from here.")
+                }
+            }
+
+            if let qr = appState.pairingQRCode {
+                Section("Pair a Phone") {
+                    HStack { Spacer(); PairingQRView(qr: qr).environmentObject(appState); Spacer() }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .navigationTitle("Devices")
+    }
+
+    /// Devices the phones are linked to that this Mac is not: one hop out,
+    /// deduplicated by id, preferring a report that says "connected".
+    private var ecosystem: [(peer: BridgProtoPeer, via: String)] {
+        let known = Set([AppState.selfInfo.id] + appState.phones.map(\.tag))
+        var seen: [String: (peer: BridgProtoPeer, via: String)] = [:]
+        for phone in appState.phones where phone.connected {
+            for peer in phone.peers where !known.contains(peer.info.id) {
+                if seen[peer.info.id] == nil || (peer.connected && seen[peer.info.id]?.peer.connected == false) {
+                    seen[peer.info.id] = (peer, phone.name)
+                }
+            }
+        }
+        return seen.values.sorted { $0.peer.info.name < $1.peer.info.name }
+    }
+}
+
+struct DeviceRow: View {
+    let info: BridgProtoDeviceInfo
+    let status: String
+    var connected = true
+    var battery: BatteryState?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: info.platform.symbol)
+                .font(.title2)
+                .frame(width: 30)
+                .foregroundColor(connected ? .accentColor : .secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(info.name).font(.headline)
+                    if let battery {
+                        Label("\(battery.percent)%", systemImage: battery.symbolName)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                Text(status)
+                    .font(.caption)
+                    .foregroundColor(connected ? .green : .secondary)
+                Text(details)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var details: String {
+        [info.platform.label, info.osVersion, info.model, info.appVersion.isEmpty ? "" : "Bridg \(info.appVersion)"]
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
+    }
+}
+
+extension BridgProtoDeviceInfo.Platform {
+    var label: String {
+        switch self {
+        case .android: return "Android"
+        case .macos: return "Mac"
+        case .windows: return "Windows"
+        case .linux: return "Linux"
+        case .ios: return "iPhone"
+        default: return "Device"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .android, .ios: return "iphone"
+        case .macos: return "laptopcomputer"
+        case .windows, .linux: return "desktopcomputer"
+        default: return "questionmark.square.dashed"
+        }
     }
 }

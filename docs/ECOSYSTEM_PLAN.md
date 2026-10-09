@@ -220,6 +220,29 @@ Bugs this turned up, all fixed:
 **Gate:** on the owner's Windows PC: install, allow the firewall prompt, pair,
 then every feature above, with the Mac connected at the same time.
 
+### Phase 2b — Several phones per computer, and a Devices view everywhere ✅ code, ⏳ hardware gate
+
+- **Mac** now holds one sealed session per phone (the Windows app already did):
+  `ConnectionManager` keeps a `PeerSession` per socket, capped at 16; a phone's
+  newer session replaces its older one only after its first sealed frame
+  opens; strangers that never handshake are dropped after 30 s. `AppState`
+  keeps a list of phones; the old single-phone properties read the *selected*
+  phone, so every screen kept working; replies, dismissals and calls go to the
+  phone the notification came from, mirror input to the phone on the mirror,
+  files to the phone picked, and a transfer stays pinned to its phone.
+  `MultiPhoneTests` drives a real instance with fake phones over real sockets:
+  two at once, targeted vs broadcast sends, quiet reconnect, a stranger with
+  the phone's public hash unable to take its session (mutation-checked), and
+  plaintext before the handshake dropped.
+- Re-pairing the same phone no longer adds a twin entry on the Mac.
+- **Proto**: `DeviceInfo` and `Peers` (fields 90, 91) — see PROTOCOL.md.
+- **Devices** section in all three apps: this device, its direct links with
+  platform / OS / model / app version / battery, and "Also in your ecosystem"
+  one hop out. Windows notifications say which phone they came from.
+
+**Gate:** two real phones on the Mac at once; the phone's Devices list showing
+the Mac and the Windows PC; the Mac's showing the PC through the phone.
+
 ### Phase 3 — iPhone + iPad satellite — ⏸ deferred by owner (no Apple Developer membership)
 
 - Extract `FrameCodec`, `EncryptedTransport`, `SharedSecretKDF` and
@@ -238,12 +261,8 @@ Android phone.
 
 ### Phase 4 — Desktop ↔ desktop
 
-First, the hub half of the old Phase 1 (moved here): the Mac (and the Windows
-hub) hold several sessions — one `PeerSession` per socket, capped at ~16; an
-older session for the same device is evicted only **after** the new one opens a
-sealed frame (`PairResume` is plaintext with a public hash, so evicting on it
-would let anyone kick a device off); per-feature routing to the right peer;
-a device list in the UI.
+The hub half of the old Phase 1 that used to open this phase — several
+sessions per hub — is done (Phase 2b).
 
 - Pairing without a camera: the hub shows its `bridg://pair/…` string as a
   copyable code; the other desktop pastes it and becomes the initiator.

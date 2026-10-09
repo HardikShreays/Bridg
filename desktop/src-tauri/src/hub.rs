@@ -58,6 +58,8 @@ pub struct Hub {
     /// ClipboardUpdate.origin_id for clips copied here.
     origin_id: String,
     connections: AtomicUsize,
+    /// Who this computer is, for the phones' Devices screens.
+    info: proto::DeviceInfo,
     mdns: Mutex<Option<mdns_sd::ServiceDaemon>>,
     error: Mutex<Option<String>>,
 }
@@ -72,6 +74,10 @@ struct Session {
 struct Live {
     battery: Option<BatteryView>,
     playing: Option<PlayingView>,
+    /// What the phone says about itself; None from phone builds before 0.5.
+    info: Option<proto::DeviceInfo>,
+    /// The computers the phone is linked to, as it last reported.
+    peers: Vec<proto::Peer>,
 }
 
 #[derive(Default)]
@@ -87,6 +93,9 @@ pub struct Snapshot {
     address: String,
     phones: Vec<PhoneView>,
     error: Option<String>,
+    this_device: DeviceView,
+    /// One hop out: what the connected phones report being linked to.
+    ecosystem: Vec<EcoView>,
 }
 
 #[derive(Serialize, Clone)]
@@ -96,6 +105,45 @@ struct PhoneView {
     connected: bool,
     battery: Option<BatteryView>,
     playing: Option<PlayingView>,
+    details: String,
+}
+
+#[derive(Serialize, Clone)]
+struct DeviceView {
+    name: String,
+    details: String,
+}
+
+#[derive(Serialize, Clone)]
+struct EcoView {
+    name: String,
+    details: String,
+    status: String,
+    connected: bool,
+    battery: Option<i32>,
+}
+
+fn platform_label(p: i32) -> &'static str {
+    use proto::device_info::Platform;
+    match Platform::try_from(p).unwrap_or(Platform::Unspecified) {
+        Platform::Android => "Android",
+        Platform::Macos => "Mac",
+        Platform::Windows => "Windows",
+        Platform::Linux => "Linux",
+        Platform::Ios => "iPhone",
+        Platform::Unspecified => "Device",
+    }
+}
+
+/// "Android · Android 16 · samsung SM-A356E · Bridg 0.5.0"
+fn details(info: &proto::DeviceInfo) -> String {
+    let version = (!info.app_version.is_empty()).then(|| format!("Bridg {}", info.app_version));
+    [Some(platform_label(info.platform).to_string()), Some(info.os_version.clone()), Some(info.model.clone()), version]
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 #[derive(Serialize, Clone)]
@@ -117,6 +165,7 @@ struct PlayingView {
 struct NotifView {
     id: String,
     device: String,
+    device_name: String,
     app: String,
     title: String,
     text: String,
@@ -170,9 +219,27 @@ impl Hub {
         // QR fields, so they cannot appear inside one.
         let host = gethostname::gethostname().to_string_lossy().into_owned();
         let name = host.split('.').next().filter(|n| !n.is_empty()).unwrap_or("Computer").replace(':', "-");
+        let public = store::public_key(&secret);
+        let os = os_info::get();
+        let platform = if cfg!(target_os = "windows") {
+            proto::device_info::Platform::Windows
+        } else if cfg!(target_os = "macos") {
+            proto::device_info::Platform::Macos
+        } else {
+            proto::device_info::Platform::Linux
+        };
+        let info = proto::DeviceInfo {
+            id: crypto::hub_tag(&public),
+            name: name.clone(),
+            platform: platform as i32,
+            app_version: env!("CARGO_PKG_VERSION").into(),
+            os_version: os.edition().map(str::to_string).unwrap_or_else(|| format!("{} {}", os.os_type(), os.version())),
+            model: String::new(),
+        };
         Ok(Arc::new(Self {
             app,
-            public: store::public_key(&secret),
+            info,
+            public,
             secret,
             name,
             store,
@@ -205,12 +272,76 @@ impl Hub {
                     connected: sessions.contains_key(&d.id),
                     battery: live.get(&d.id).and_then(|l| l.battery.clone()),
                     playing: live.get(&d.id).and_then(|l| l.playing.clone()),
+                    details: live.get(&d.id).and_then(|l| l.info.as_ref()).map(details).unwrap_or_else(|| "Android".into()),
                     id: d.id,
                     name: d.name,
                 })
                 .collect(),
             error: self.error.lock().unwrap().clone(),
+            this_device: DeviceView { name: self.info.name.clone(), details: details(&self.info) },
+            ecosystem: self.ecosystem(&live),
         }
+    }
+
+    /// Devices the connected phones are linked to that this computer is not:
+    /// one hop out, never forwarded, deduplicated by id, "connected" wins.
+    fn ecosystem(&self, live: &HashMap<String, Live>) -> Vec<EcoView> {
+        let devices = self.store.devices();
+        let mut known: Vec<String> = devices.iter().filter_map(|d| B64.decode(&d.public_key).ok()).map(|k| crypto::hub_tag(&k)).collect();
+        known.push(self.info.id.clone());
+        let mut seen: HashMap<String, EcoView> = HashMap::new();
+        for d in &devices {
+            let Some(l) = live.get(&d.id) else { continue };
+            for peer in &l.peers {
+                let Some(info) = &peer.info else { continue };
+                if info.id.is_empty() || known.contains(&info.id) || seen.get(&info.id).is_some_and(|e| e.connected) {
+                    continue;
+                }
+                seen.insert(info.id.clone(), EcoView {
+                    name: info.name.clone(),
+                    details: details(info),
+                    status: if peer.connected { format!("Connected to {}", d.name) } else { format!("Paired with {}, offline", d.name) },
+                    connected: peer.connected,
+                    battery: (peer.battery_percent >= 0).then_some(peer.battery_percent),
+                });
+            }
+        }
+        let mut out: Vec<EcoView> = seen.into_values().collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
+    /// Tell every connected phone which phones this computer has.
+    fn share_peers(&self) {
+        let sessions: Vec<String> = self.sessions.lock().unwrap().keys().cloned().collect();
+        let live = self.live.lock().unwrap();
+        let peers = self
+            .store
+            .devices()
+            .into_iter()
+            .map(|d| {
+                let l = live.get(&d.id);
+                let mut info = l.and_then(|l| l.info.clone()).unwrap_or_default();
+                if info.id.is_empty() {
+                    info.id = B64.decode(&d.public_key).map(|k| crypto::hub_tag(&k)).unwrap_or_default();
+                }
+                if info.name.is_empty() {
+                    info.name = d.name.clone();
+                }
+                if info.platform == 0 {
+                    info.platform = proto::device_info::Platform::Android as i32;
+                }
+                let battery = l.and_then(|l| l.battery.as_ref());
+                proto::Peer {
+                    info: Some(info),
+                    connected: sessions.contains(&d.id),
+                    battery_percent: battery.map(|b| b.percent as i32).unwrap_or(-1),
+                    charging: battery.is_some_and(|b| b.charging),
+                }
+            })
+            .collect();
+        drop(live);
+        self.broadcast_except(None, &env(Payload::Peers(proto::Peers { peers })));
     }
 
     fn changed(&self) {
@@ -413,9 +544,12 @@ impl Hub {
 
     fn register(&self, id: &str, session: Session) {
         eprintln!("Phone connected: {id}");
+        // Who we are, then who else is here — for the phone's Devices screen.
+        let _ = session.tx.try_send(env(Payload::DeviceInfo(self.info.clone())));
         if let Some(old) = self.sessions.lock().unwrap().insert(id.to_string(), session) {
             old.kick.notify_one();
         }
+        self.share_peers();
         self.changed();
     }
 
@@ -426,6 +560,7 @@ impl Hub {
             drop(sessions);
             eprintln!("Phone disconnected: {id}");
             self.live.lock().unwrap().remove(id);
+            self.share_peers();
             self.changed();
         }
     }
@@ -466,6 +601,16 @@ impl Hub {
             Some(Payload::DeviceStatus(s)) => {
                 self.live.lock().unwrap().entry(device.id.clone()).or_default().battery =
                     Some(BatteryView { percent: s.battery_percent, charging: s.charging, low: s.battery_low });
+                self.share_peers();
+                self.changed();
+            }
+            Some(Payload::DeviceInfo(info)) => {
+                self.live.lock().unwrap().entry(device.id.clone()).or_default().info = Some(info);
+                self.share_peers();
+                self.changed();
+            }
+            Some(Payload::Peers(p)) => {
+                self.live.lock().unwrap().entry(device.id.clone()).or_default().peers = p.peers;
                 self.changed();
             }
             Some(Payload::MediaState(m)) => {
@@ -508,6 +653,7 @@ impl Hub {
             NotifView {
                 id: n.id,
                 device: device.id.clone(),
+                device_name: device.name.clone(),
                 app: n.app_label,
                 title: n.title,
                 text: n.text,

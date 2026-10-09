@@ -46,6 +46,9 @@ message Envelope {
     DeviceStatus device_status = 80;
     RemoteAction remote_action = 81;
 
+    DeviceInfo device_info = 90;
+    Peers peers = 91;
+
     Ping ping = 100;
     Pong pong = 101;
   }
@@ -303,6 +306,47 @@ message RemoteAction {
   }
   Action action = 1;
   string url = 2;    // OPEN_URL only; http/https are the only schemes accepted
+}
+
+// ─── Ecosystem ───────────────────────────────────────────────────────────────
+
+// Who a device is. Sent by both sides as one of the first sealed frames of
+// every session. Older apps never send it; receivers fall back to what the
+// handshake told them (name only).
+message DeviceInfo {
+  enum Platform {
+    PLATFORM_UNSPECIFIED = 0;
+    ANDROID = 1;
+    MACOS = 2;
+    WINDOWS = 3;
+    LINUX = 4;
+    IOS = 5;
+  }
+  // Hex of the first 8 bytes of SHA-256(this device's public key) — the same
+  // "hub tag" computers advertise in Bonjour. Every app derives the same id for
+  // a device, so lists from different peers merge without duplicates.
+  string id = 1;
+  string name = 2;
+  Platform platform = 3;
+  string app_version = 4;       // "0.5.0"
+  string os_version = 5;        // "Android 16", "macOS 26.0", "Windows 11"
+  string model = 6;             // "SM-A356E", "MacBookPro18,3"
+}
+
+// The devices the sender is linked with directly, so each app can show the
+// whole ecosystem rather than only its own links: a Mac learns about the
+// Windows PC through the phone that is connected to both. Sent after
+// DeviceInfo and again whenever the list or a battery changes. Receivers show
+// these one hop away and never forward them, so nothing can circulate stale.
+message Peers {
+  repeated Peer peers = 1;
+}
+
+message Peer {
+  DeviceInfo info = 1;
+  bool connected = 2;
+  int32 battery_percent = 3;    // -1 when unknown (computers, old phones)
+  bool charging = 4;
 }
 
 // ─── Keepalive ───────────────────────────────────────────────────────────────

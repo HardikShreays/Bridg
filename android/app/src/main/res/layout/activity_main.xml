@@ -237,6 +237,13 @@
             android:background="@drawable/bg_card"
             android:orientation="vertical">
 
+            <!-- This phone, its computers, and what those report: filled by MainActivity. -->
+            <LinearLayout
+                android:id="@+id/devicesList"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
+
             <LinearLayout
                 android:id="@+id/btnPair"
                 android:layout_width="match_parent"

@@ -2,58 +2,78 @@ import Foundation
 import Network
 import CryptoKit
 
-/// Owns the connection lifecycle. The Mac is the *server*: it advertises
-/// `_bridg._tcp` over Bonjour and listens; the phone discovers and dials in.
+/// Owns every connection. The Mac is the *server*: it advertises `_bridg._tcp`
+/// over Bonjour and listens; phones discover it and dial in — several at once,
+/// each in its own sealed session.
 ///
 /// The previous version both advertised and browsed, so the Mac discovered its
 /// own service and dialled itself on every browse update.
 final class ConnectionManager {
     static let port: UInt16 = 18920
 
-    /// Three missed ping intervals. The phone answers every ping, so silence
-    /// this long means the link is gone even if TCP still believes in it.
-    private static let pongTimeout: TimeInterval = 30
+    /// Three missed ping intervals. A phone answers every ping, so silence this
+    /// long means the link is gone even if TCP still believes in it — and a
+    /// stranger who opened a socket and never handshook is dropped as well.
+    private static let silenceTimeout: TimeInterval = 30
 
-    private let keychainManager = KeychainManager()
-    private let pairingManager = PairingManager()
+    /// ponytail: fixed cap so a flood of strangers can't pin memory; per-address
+    /// limits if Bridg ever listens beyond a home LAN.
+    private static let maxConnections = 16
+
+    private let keychainManager: KeychainManager
+    private let pairingManager: PairingManager
+    private let listenPort: UInt16
+    private let advertise: Bool
 
     /// Everything network-facing runs here. It used to run on `.main`, which
     /// put per-frame decrypt, protobuf parsing and H.264 sample assembly on the
     /// same thread as SwiftUI — the mirror stuttered because the UI and the
     /// decoder were fighting over one thread.
-    private let netQueue = DispatchQueue(label: "com.bridg.net")
+    let netQueue = DispatchQueue(label: "com.bridg.net")
 
     private var listener: NWListener?
-    private var connection: NWConnection?
-    private let frameBuffer = FrameBuffer()
-
-    private var encryptedTransport: EncryptedTransport?
     private var isRunning = false
     private var pingTimer: Timer?
 
-    /// True once the current connection has completed a handshake. Anything
-    /// before that is just a stranger who opened a TCP socket.
-    private var isAuthenticated = false
+    /// One accepted socket. It speaks for a phone once its handshake names one,
+    /// and *is* that phone's session once its first sealed frame opens.
+    private final class PeerSession {
+        let connection: NWConnection
+        let frameBuffer = FrameBuffer()
+        var transport: EncryptedTransport?
+        var device: KeychainManager.PairedDeviceInfo?
+        /// The phone proved it holds the key: a sealed frame opened.
+        var confirmed = false
+        var lastHeardAt = Date()
 
-    /// When the current connection last proved it was alive. A phone that
-    /// leaves the Wi-Fi network never closes its socket, so without this the
-    /// Mac holds a dead connection open and refuses the real reconnect.
-    private var lastPongAt = Date()
+        init(_ connection: NWConnection) { self.connection = connection }
+    }
+
+    private var peers: [ObjectIdentifier: PeerSession] = [:]
+    /// Device id → the confirmed session serving that phone right now.
+    private var sessions: [String: ObjectIdentifier] = [:]
 
     /// Token from the QR code currently on screen. Non-nil only while pairing.
     private var activePairingToken: String?
 
-    // Callbacks (delivered on [netQueue]; AppState hops to the main actor).
-    var onConnected: ((String) -> Void)?
-    var onDisconnected: (() -> Void)?
-    var onPaired: ((String) -> Void)?
-    var onMessage: ((BridgProtoEnvelope) -> Void)?
-
+    // Callbacks, delivered on [netQueue]; AppState hops to the main actor.
+    var onPhoneConnected: ((KeychainManager.PairedDeviceInfo) -> Void)?
+    var onPhoneDisconnected: ((String) -> Void)?
+    var onPaired: ((KeychainManager.PairedDeviceInfo) -> Void)?
+    /// Everything but video, with the id of the phone it came from.
+    var onMessage: ((BridgProtoEnvelope, String) -> Void)?
     /// Video traffic, delivered synchronously on [netQueue] so decoding never
-    /// touches the main thread. Everything else goes through [onMessage].
-    var onVideoMessage: ((BridgProtoEnvelope) -> Void)?
+    /// touches the main thread.
+    var onVideoMessage: ((BridgProtoEnvelope, String) -> Void)?
 
-    var isConnected: Bool { connection?.state == .ready }
+    /// `port` and `keychainManager` are injectable so tests can run a real
+    /// instance against a throwaway identity without touching the app's.
+    init(port: UInt16 = ConnectionManager.port, keychainManager: KeychainManager = KeychainManager(), advertise: Bool = true) {
+        self.listenPort = port
+        self.keychainManager = keychainManager
+        self.pairingManager = PairingManager(keychainManager: keychainManager)
+        self.advertise = advertise
+    }
 
     // MARK: - Lifecycle
 
@@ -62,6 +82,7 @@ final class ConnectionManager {
             guard !self.isRunning else { return }
             self.isRunning = true
             self.startListening()
+            self.startPinging()
         }
     }
 
@@ -70,40 +91,60 @@ final class ConnectionManager {
             self.isRunning = false
             self.stopPinging()
             self.listener?.cancel()
-            self.connection?.cancel()
             self.listener = nil
-            self.connection = nil
-            self.encryptedTransport = nil
-            self.isAuthenticated = false
+            for peer in self.peers.values { peer.connection.cancel() }
+            self.peers.removeAll()
+            self.sessions.removeAll()
         }
     }
 
-    /// Arm pairing: the phone's next PairRequest must carry this token.
+    /// Arm pairing: the next PairRequest must carry this token.
     func beginPairing(token: String) {
         netQueue.async { self.activePairingToken = token }
     }
 
-    // MARK: - Sending
-
-    /// `sent` fires once the socket has taken the bytes, or immediately with
-    /// `false` if the frame could not go out. Bulk producers use it as their
-    /// backpressure signal; everything else ignores it.
-    func send(_ envelope: BridgProtoEnvelope, sent: ((Bool) -> Void)? = nil) {
-        netQueue.async { self.sendOnQueue(envelope, sent: sent) }
+    /// Drop a phone's live session, e.g. after unpairing it.
+    func disconnect(deviceID: String) {
+        netQueue.async {
+            guard let oid = self.sessions[deviceID] else { return }
+            self.peers[oid]?.connection.cancel()
+        }
     }
 
-    private func sendOnQueue(_ envelope: BridgProtoEnvelope, sent: ((Bool) -> Void)? = nil) {
-        guard let connection, connection.state == .ready else {
-            print("Not connected — dropping \(envelope.payload.map(String.init(describing:)) ?? "message")")
+    // MARK: - Sending
+
+    /// Send to one phone. `sent` fires once the socket has taken the bytes, or
+    /// immediately with `false` if the frame could not go out. Bulk producers
+    /// use it as their backpressure signal; everything else ignores it.
+    func send(_ envelope: BridgProtoEnvelope, to deviceID: String, sent: ((Bool) -> Void)? = nil) {
+        netQueue.async {
+            guard let oid = self.sessions[deviceID], let peer = self.peers[oid] else {
+                print("Phone \(deviceID) not connected — dropping \(envelope.payload.map(String.init(describing:)) ?? "message")")
+                sent?(false)
+                return
+            }
+            self.sendOnQueue(envelope, to: peer, sent: sent)
+        }
+    }
+
+    /// Send to every connected phone, optionally skipping the one it came from.
+    func broadcast(_ envelope: BridgProtoEnvelope, except deviceID: String? = nil) {
+        netQueue.async {
+            for (id, oid) in self.sessions where id != deviceID {
+                if let peer = self.peers[oid] { self.sendOnQueue(envelope, to: peer) }
+            }
+        }
+    }
+
+    private func sendOnQueue(_ envelope: BridgProtoEnvelope, to peer: PeerSession, sent: ((Bool) -> Void)? = nil) {
+        guard peer.connection.state == .ready else {
             sent?(false)
             return
         }
-
         do {
             var payload = try envelope.serializedData()
-
             // Everything after the pairing handshake goes out encrypted.
-            if let transport = encryptedTransport {
+            if let transport = peer.transport {
                 guard let sealed = transport.encrypt(payload) else {
                     print("Encryption failed — dropping message")
                     sent?(false)
@@ -111,8 +152,7 @@ final class ConnectionManager {
                 }
                 payload = sealed
             }
-
-            connection.send(content: FrameCodec.encode(payload), completion: .contentProcessed { error in
+            peer.connection.send(content: FrameCodec.encode(payload), completion: .contentProcessed { error in
                 if let error { print("Send error: \(error)") }
                 sent?(error == nil)
             })
@@ -130,26 +170,28 @@ final class ConnectionManager {
             params.includePeerToPeer = true
             (params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options)?.noDelay = true
 
-            let listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: Self.port)!)
+            let listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: listenPort)!)
 
-            listener.service = NWListener.Service(
-                name: "Bridg-\(Self.deviceName)",
-                type: "_bridg._tcp",
-                txtRecord: NWTXTRecord([
-                    "name": Self.deviceName,
-                    // Lets a phone paired with several computers dial only its
-                    // own and know which one it reached.
-                    "id": Self.hubTag(publicKey: keychainManager.getOrCreatePublicKey()),
-                ])
-            )
+            if advertise {
+                listener.service = NWListener.Service(
+                    name: "Bridg-\(Self.deviceName)",
+                    type: "_bridg._tcp",
+                    txtRecord: NWTXTRecord([
+                        "name": Self.deviceName,
+                        // Lets a phone paired with several computers dial only its
+                        // own and know which one it reached.
+                        "id": Self.hubTag(publicKey: keychainManager.getOrCreatePublicKey()),
+                    ])
+                )
+            }
 
             listener.newConnectionHandler = { [weak self] connection in
                 self?.accept(connection)
             }
 
-            listener.stateUpdateHandler = { state in
+            listener.stateUpdateHandler = { [listenPort] state in
                 switch state {
-                case .ready: print("Listening on port \(Self.port), advertising _bridg._tcp")
+                case .ready: print("Listening on port \(listenPort), advertising _bridg._tcp")
                 case .failed(let error): print("Listener failed: \(error)")
                 default: break
                 }
@@ -162,82 +204,76 @@ final class ConnectionManager {
         }
     }
 
-    private func accept(_ new: NWConnection) {
-        // One phone at a time — but an unauthenticated newcomer must not be
-        // able to evict a paired phone. Anything on the network can open a
-        // socket to this port, and cancelling first meant anything on the
-        // network could hang up your phone. A genuine reconnect arrives after
-        // the old socket closed (so there is nothing to evict), or once the
-        // keepalive below has retired a silently dead one.
-        if isAuthenticated, connection != nil {
-            print("Refusing \(new.endpoint): already connected to a paired phone")
-            new.cancel()
+    private func accept(_ connection: NWConnection) {
+        // Accepting a newcomer never touches an existing session: anything on
+        // the network can open this port, and it used to be able to hang up
+        // your phone just by connecting.
+        guard peers.count < Self.maxConnections else {
+            print("Refusing \(connection.endpoint): too many connections")
+            connection.cancel()
             return
         }
+        let peer = PeerSession(connection)
+        let oid = ObjectIdentifier(peer)
+        peers[oid] = peer
 
-        connection?.cancel()
-        frameBuffer.reset()
-        encryptedTransport = nil
-        isAuthenticated = false
-        connection = new
-
-        new.stateUpdateHandler = { [weak self] state in
+        connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
             case .ready:
-                print("Phone connected: \(new.endpoint)")
-                self.lastPongAt = Date()
-                self.onConnected?("\(new.endpoint)")
-                self.startPinging()
+                peer.lastHeardAt = Date()
             case .failed(let error):
                 print("Connection failed: \(error)")
-                self.teardown(new)
+                self.teardown(oid)
             case .cancelled:
-                self.teardown(new)
+                self.teardown(oid)
             default:
                 break
             }
         }
 
-        new.start(queue: netQueue)
-        receive(on: new)
+        connection.start(queue: netQueue)
+        receive(oid)
     }
 
-    private func teardown(_ dead: NWConnection) {
-        // Ignore the death rattle of a connection we already replaced.
-        guard dead === connection else { return }
-        stopPinging()
-        connection = nil
-        encryptedTransport = nil
-        isAuthenticated = false
-        frameBuffer.reset()
-        onDisconnected?()
+    private func teardown(_ oid: ObjectIdentifier) {
+        guard let peer = peers.removeValue(forKey: oid) else { return }
+        peer.connection.cancel()
+        // Only the session currently serving a phone takes the phone with it; a
+        // session already replaced by a newer one just goes quietly.
+        if let id = peer.device?.id, sessions[id] == oid {
+            sessions[id] = nil
+            print("Phone disconnected: \(peer.device?.name ?? id)")
+            onPhoneDisconnected?(id)
+        }
     }
 
     /// The keepalive Timer needs a run loop, and [netQueue] has none — schedule
-    /// and invalidate it on main. `send` hops back to the queue on its own.
+    /// and invalidate it on main, do the work on the queue.
     private func startPinging() {
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
             self.pingTimer?.invalidate()
             self.pingTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
-                guard let self, self.isConnected else { return }
+                self?.netQueue.async { self?.keepAlive() }
+            }
+        }
+    }
 
-                // No answer in three ping intervals: the link is dead even
-                // though TCP has not noticed. Retire it so the phone's next
-                // reconnect is not refused as a duplicate.
-                self.netQueue.async {
-                    guard let connection = self.connection else { return }
-                    if Date().timeIntervalSince(self.lastPongAt) > Self.pongTimeout {
-                        print("No pong in \(Self.pongTimeout)s — dropping a dead connection")
-                        connection.cancel()
-                    }
-                }
+    private func keepAlive() {
+        var ping = BridgProtoPing()
+        ping.timestamp = UInt64(Date().timeIntervalSince1970 * 1000)
+        var envelope = BridgProtoEnvelope()
+        envelope.ping = ping
 
-                var ping = BridgProtoPing()
-                ping.timestamp = UInt64(Date().timeIntervalSince1970 * 1000)
-                var envelope = BridgProtoEnvelope()
-                envelope.ping = ping
-                self.send(envelope)
+        for peer in peers.values {
+            // Silent too long: the link is dead even though TCP has not
+            // noticed, or it is a stranger that never handshook.
+            if Date().timeIntervalSince(peer.lastHeardAt) > Self.silenceTimeout {
+                print("Nothing heard in \(Self.silenceTimeout)s — dropping \(peer.connection.endpoint)")
+                peer.connection.cancel()
+            } else if peer.transport != nil {
+                sendOnQueue(envelope, to: peer)
             }
         }
     }
@@ -251,53 +287,52 @@ final class ConnectionManager {
 
     // MARK: - Receiving
 
-    private func receive(on connection: NWConnection) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
-            guard let self else { return }
+    private func receive(_ oid: ObjectIdentifier) {
+        guard let peer = peers[oid] else { return }
+        peer.connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
+            guard let self, self.peers[oid] != nil else { return }
 
             if let data, !data.isEmpty {
-                self.frameBuffer.append(data)
-                self.drainFrames()
+                peer.frameBuffer.append(data)
+                self.drainFrames(oid)
             }
-
             if let error {
                 print("Receive error: \(error)")
-                self.teardown(connection)
+                self.teardown(oid)
                 return
             }
-
             if isComplete {
-                self.teardown(connection)
+                self.teardown(oid)
                 return
             }
-
-            self.receive(on: connection)
+            self.receive(oid)
         }
     }
 
-    private func drainFrames() {
-        while true {
+    private func drainFrames(_ oid: ObjectIdentifier) {
+        while let peer = peers[oid] {
             let frame: Data?
             do {
-                frame = try frameBuffer.next()
+                frame = try peer.frameBuffer.next()
             } catch {
                 print("Framing error: \(error) — dropping connection")
-                connection?.cancel()
+                peer.connection.cancel()
                 return
             }
             guard let frame else { return }
 
             // Pre-pairing frames are plaintext; everything after is sealed.
             let payload: Data
-            if let transport = encryptedTransport {
+            if let transport = peer.transport {
                 // A frame that will not open is a replay, a forgery or a key
                 // mismatch. None of those get better by reading the next frame.
                 guard let opened = transport.decrypt(frame) else {
                     print("Rejected frame — dropping connection")
-                    connection?.cancel()
+                    peer.connection.cancel()
                     return
                 }
                 payload = opened
+                if !peer.confirmed { confirm(oid, peer) }
             } else {
                 payload = frame
             }
@@ -311,23 +346,41 @@ final class ConnectionManager {
             // the handshake. Anything on the LAN can open this port, and a
             // plaintext clipboard, notification or file frame used to reach the
             // feature handlers as if it came from the paired phone.
-            if encryptedTransport == nil, !Self.allowedBeforeHandshake(envelope) {
+            if peer.transport == nil, !Self.allowedBeforeHandshake(envelope) {
                 print("Plaintext \(envelope.payload.map(String.init(describing:)) ?? "frame") before the handshake — dropping connection")
-                connection?.cancel()
+                peer.connection.cancel()
                 return
             }
 
-            if handleTransportMessage(envelope) { continue }
+            peer.lastHeardAt = Date()
+            if handleTransportMessage(envelope, oid, peer) { continue }
+            guard peer.confirmed, let id = peer.device?.id else { continue }
 
             // Decode on this queue rather than shipping the frame to the main
             // actor first — that hop is what the mirror's latency was made of.
             switch envelope.payload {
             case .videoFrame, .videoStreamStart, .videoStreamStop, .audioFrame:
-                onVideoMessage?(envelope)
+                onVideoMessage?(envelope, id)
             default:
-                onMessage?(envelope)
+                onMessage?(envelope, id)
             }
         }
+    }
+
+    /// The first sealed frame opened: this socket really is the phone it named
+    /// in its handshake. Only now may it take over from an older session for the
+    /// same phone. PairResume is plaintext and carries a public key hash, so
+    /// letting it evict would let anyone on the network kick a phone off.
+    private func confirm(_ oid: ObjectIdentifier, _ peer: PeerSession) {
+        guard let device = peer.device else { return }
+        peer.confirmed = true
+        // Point the phone at this session first: the old one's teardown then
+        // sees it no longer serves the phone and goes without reporting it gone.
+        let old = sessions[device.id]
+        sessions[device.id] = oid
+        if let old, old != oid { peers[old]?.connection.cancel() }
+        print("Phone connected: \(device.name)")
+        onPhoneConnected?(device)
     }
 
     // MARK: - Handshake + keepalive
@@ -341,28 +394,26 @@ final class ConnectionManager {
     }
 
     /// Returns true when the message was consumed by the transport layer itself.
-    private func handleTransportMessage(_ envelope: BridgProtoEnvelope) -> Bool {
+    private func handleTransportMessage(_ envelope: BridgProtoEnvelope, _ oid: ObjectIdentifier, _ peer: PeerSession) -> Bool {
         switch envelope.payload {
         case .pairRequest(let request):
-            handlePairRequest(request)
+            if peer.transport == nil { handlePairRequest(request, peer) }
             return true
 
         case .pairResume(let resume):
-            handlePairResume(resume)
+            if peer.transport == nil { handlePairResume(resume, peer) }
             return true
 
         case .ping(let ping):
-            lastPongAt = Date()
             var pong = BridgProtoPong()
             pong.timestamp = UInt64(Date().timeIntervalSince1970 * 1000)
             pong.pingTimestamp = ping.timestamp
             var reply = BridgProtoEnvelope()
             reply.pong = pong
-            sendOnQueue(reply)
+            sendOnQueue(reply, to: peer)
             return true
 
         case .pong:
-            lastPongAt = Date()
             return true
 
         default:
@@ -370,7 +421,7 @@ final class ConnectionManager {
         }
     }
 
-    private func handlePairRequest(_ request: BridgProtoPairRequest) {
+    private func handlePairRequest(_ request: BridgProtoPairRequest, _ peer: PeerSession) {
         guard let expected = activePairingToken else {
             print("PairRequest with no pairing in progress — ignoring")
             return
@@ -378,7 +429,7 @@ final class ConnectionManager {
         guard var response = pairingManager.handlePairRequest(request, expectedToken: expected) else {
             return // token mismatch, already logged
         }
-        guard let info = connectionInfo(initiatorSalt: request.sessionSalt) else { return }
+        guard let info = connectionInfo(initiatorSalt: request.sessionSalt, peer) else { return }
 
         let peerKey = request.senderPubkey
         guard let sharedKey = keychainManager.deriveSharedSecret(peerPublicKeyData: peerKey, info: info.info) else {
@@ -386,7 +437,7 @@ final class ConnectionManager {
             return
         }
 
-        pairingManager.completePairing(peerPublicKey: peerKey, deviceName: request.deviceName)
+        let device = pairingManager.completePairing(peerPublicKey: peerKey, deviceName: request.deviceName)
         activePairingToken = nil
 
         // The response is the last plaintext frame and carries our salt, which
@@ -394,22 +445,21 @@ final class ConnectionManager {
         response.sessionSalt = info.ourSalt
         var envelope = BridgProtoEnvelope()
         envelope.pairResponse = response
-        sendOnQueue(envelope)
+        sendOnQueue(envelope, to: peer)
 
-        encryptedTransport = EncryptedTransport(sharedKey: sharedKey, sending: .macToPhone)
-        isAuthenticated = true
-        onPaired?(request.deviceName)
+        peer.device = device
+        peer.transport = EncryptedTransport(sharedKey: sharedKey, sending: .macToPhone)
+        onPaired?(device)
     }
 
-    private func handlePairResume(_ resume: BridgProtoPairResume) {
-        let devices = keychainManager.getPairedDevices()
-        guard let device = devices.first(where: {
+    private func handlePairResume(_ resume: BridgProtoPairResume, _ peer: PeerSession) {
+        guard let device = keychainManager.getPairedDevices().first(where: {
             Data(SHA256.hash(data: $0.publicKey)) == resume.devicePubkeyHash
         }) else {
             print("PairResume from an unknown device — ignoring")
             return
         }
-        guard let info = connectionInfo(initiatorSalt: resume.sessionSalt) else { return }
+        guard let info = connectionInfo(initiatorSalt: resume.sessionSalt, peer) else { return }
 
         guard let sharedKey = keychainManager.deriveSharedSecret(peerPublicKeyData: device.publicKey, info: info.info) else {
             print("Key agreement failed on resume")
@@ -424,20 +474,19 @@ final class ConnectionManager {
         ack.sessionSalt = info.ourSalt
         var envelope = BridgProtoEnvelope()
         envelope.pairResumeAck = ack
-        sendOnQueue(envelope)
+        sendOnQueue(envelope, to: peer)
 
-        encryptedTransport = EncryptedTransport(sharedKey: sharedKey, sending: .macToPhone)
-        isAuthenticated = true
-        onPaired?(device.name)
+        peer.device = device
+        peer.transport = EncryptedTransport(sharedKey: sharedKey, sending: .macToPhone)
     }
 
     /// Our fresh salt plus the HKDF info binding this connection's key to both
     /// sides' salts. Nil if the phone sent none — an old build whose key would
     /// repeat on every reconnect, which is exactly what the salts prevent.
-    private func connectionInfo(initiatorSalt: Data) -> (ourSalt: Data, info: Data)? {
+    private func connectionInfo(initiatorSalt: Data, _ peer: PeerSession) -> (ourSalt: Data, info: Data)? {
         guard initiatorSalt.count == SharedSecretKDF.saltLength else {
             print("Handshake carried no session salt — refusing to connect. Update the phone app.")
-            connection?.cancel()
+            peer.connection.cancel()
             return nil
         }
         let ourSalt = SharedSecretKDF.randomSalt()

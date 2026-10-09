@@ -6,7 +6,11 @@ import AppKit
 /// Manages the pairing flow from the Mac side:
 /// generating QR codes, handling PairRequest/PairResponse.
 class PairingManager {
-    private let keychainManager = KeychainManager()
+    private let keychainManager: KeychainManager
+
+    init(keychainManager: KeychainManager = KeychainManager()) {
+        self.keychainManager = keychainManager
+    }
 
     /// Generate a pairing token for display in QR code.
     func generatePairingToken() -> String {
@@ -127,9 +131,9 @@ class PairingManager {
     }
 
     /// Complete pairing by storing the paired device.
-    func completePairing(peerPublicKey: Data, deviceName: String) {
-        keychainManager.savePairedDevice(name: deviceName, publicKey: peerPublicKey)
+    func completePairing(peerPublicKey: Data, deviceName: String) -> KeychainManager.PairedDeviceInfo {
         print("Paired with device: \(deviceName)")
+        return keychainManager.savePairedDevice(name: deviceName, publicKey: peerPublicKey)
     }
 
     private var deviceName: String {

@@ -344,9 +344,70 @@ class MainActivity : AppCompatActivity() {
             if (connected) R.string.state_connected else R.string.state_looking
         )
 
+        renderDevices()
+
         renderAccess(binding.notificationAccessState, isNotificationListenerEnabled())
         renderAccess(binding.accessibilityAccessState, isAccessibilityEnabled())
     }
+
+    /** This phone, its computers, and the other phones those computers report. */
+    private fun renderDevices() {
+        val list = binding.devicesList
+        list.removeAllViews()
+        val (self, computers, others) = bridgService?.ecosystem() ?: return
+        addDeviceRow(list, BridgService.DeviceRow(self, "This phone", true))
+        computers.forEach { addDeviceRow(list, it) }
+        if (others.isNotEmpty()) {
+            list.addView(android.widget.TextView(this).apply {
+                text = "Also in your ecosystem"
+                textSize = 13f
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.label_secondary))
+                setPadding(dp(16), dp(14), dp(16), dp(2))
+            })
+            others.forEach { addDeviceRow(list, it) }
+        }
+        // A hairline before the "Pair a new computer" row.
+        list.addView(android.view.View(this).apply {
+            setBackgroundColor(ContextCompat.getColor(this@MainActivity, R.color.separator))
+            layoutParams = android.widget.LinearLayout.LayoutParams(android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 1)
+        })
+    }
+
+    private fun addDeviceRow(list: android.widget.LinearLayout, row: BridgService.DeviceRow) {
+        val info = row.info
+        val platform = when (info.platform) {
+            com.bridg.proto.DeviceInfo.Platform.ANDROID -> "Android"
+            com.bridg.proto.DeviceInfo.Platform.MACOS -> "Mac"
+            com.bridg.proto.DeviceInfo.Platform.WINDOWS -> "Windows"
+            com.bridg.proto.DeviceInfo.Platform.LINUX -> "Linux"
+            com.bridg.proto.DeviceInfo.Platform.IOS -> "iPhone"
+            else -> "Computer"
+        }
+        val battery = if (row.battery >= 0) " · ${row.battery}%" else ""
+        val details = listOf(platform, info.osVersion, info.model, info.appVersion.ifEmpty { null }?.let { "Bridg $it" })
+            .filter { !it.isNullOrEmpty() }.joinToString(" · ")
+        list.addView(android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            addView(android.widget.TextView(this@MainActivity).apply {
+                text = info.name.ifEmpty { platform }
+                textSize = 16f
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.label))
+            })
+            addView(android.widget.TextView(this@MainActivity).apply {
+                text = row.status + battery
+                textSize = 13f
+                setTextColor(ContextCompat.getColor(this@MainActivity, if (row.connected) R.color.green else R.color.label_secondary))
+            })
+            addView(android.widget.TextView(this@MainActivity).apply {
+                text = details
+                textSize = 12f
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.label_tertiary))
+            })
+        })
+    }
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     private fun renderAccess(view: android.widget.TextView, enabled: Boolean) {
         view.setText(if (enabled) R.string.access_on else R.string.access_off)

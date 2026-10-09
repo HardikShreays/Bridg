@@ -212,6 +212,22 @@ nonisolated struct BridgProtoEnvelope: Sendable {
     set {payload = .remoteAction(newValue)}
   }
 
+  var deviceInfo: BridgProtoDeviceInfo {
+    get {
+      if case .deviceInfo(let v)? = payload {return v}
+      return BridgProtoDeviceInfo()
+    }
+    set {payload = .deviceInfo(newValue)}
+  }
+
+  var peers: BridgProtoPeers {
+    get {
+      if case .peers(let v)? = payload {return v}
+      return BridgProtoPeers()
+    }
+    set {payload = .peers(newValue)}
+  }
+
   var ping: BridgProtoPing {
     get {
       if case .ping(let v)? = payload {return v}
@@ -253,6 +269,8 @@ nonisolated struct BridgProtoEnvelope: Sendable {
     case mediaCommand(BridgProtoMediaCommand)
     case deviceStatus(BridgProtoDeviceStatus)
     case remoteAction(BridgProtoRemoteAction)
+    case deviceInfo(BridgProtoDeviceInfo)
+    case peers(BridgProtoPeers)
     case ping(BridgProtoPing)
     case pong(BridgProtoPong)
 
@@ -1000,6 +1018,132 @@ nonisolated struct BridgProtoRemoteAction: Sendable {
   init() {}
 }
 
+/// Who a device is. Sent by both sides as one of the first sealed frames of
+/// every session. Older apps never send it; receivers fall back to what the
+/// handshake told them (name only).
+nonisolated struct BridgProtoDeviceInfo: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// Hex of the first 8 bytes of SHA-256(this device's public key) — the same
+  /// "hub tag" computers advertise in Bonjour. Every app derives the same id for
+  /// a device, so lists from different peers merge without duplicates.
+  var id: String = String()
+
+  var name: String = String()
+
+  var platform: BridgProtoDeviceInfo.Platform = .unspecified
+
+  /// "0.5.0"
+  var appVersion: String = String()
+
+  /// "Android 16", "macOS 26.0", "Windows 11"
+  var osVersion: String = String()
+
+  /// "SM-A356E", "MacBookPro18,3"
+  var model: String = String()
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  nonisolated enum Platform: SwiftProtobuf.Enum, Swift.CaseIterable {
+    typealias RawValue = Int
+    case unspecified // = 0
+    case android // = 1
+    case macos // = 2
+    case windows // = 3
+    case linux // = 4
+    case ios // = 5
+    case UNRECOGNIZED(Int)
+
+    init() {
+      self = .unspecified
+    }
+
+    init?(rawValue: Int) {
+      switch rawValue {
+      case 0: self = .unspecified
+      case 1: self = .android
+      case 2: self = .macos
+      case 3: self = .windows
+      case 4: self = .linux
+      case 5: self = .ios
+      default: self = .UNRECOGNIZED(rawValue)
+      }
+    }
+
+    var rawValue: Int {
+      switch self {
+      case .unspecified: return 0
+      case .android: return 1
+      case .macos: return 2
+      case .windows: return 3
+      case .linux: return 4
+      case .ios: return 5
+      case .UNRECOGNIZED(let i): return i
+      }
+    }
+
+    // The compiler won't synthesize support with the UNRECOGNIZED case.
+    static let allCases: [BridgProtoDeviceInfo.Platform] = [
+      .unspecified,
+      .android,
+      .macos,
+      .windows,
+      .linux,
+      .ios,
+    ]
+
+  }
+
+  init() {}
+}
+
+/// The devices the sender is linked with directly, so each app can show the
+/// whole ecosystem rather than only its own links: a Mac learns about the
+/// Windows PC through the phone that is connected to both. Sent after
+/// DeviceInfo and again whenever the list or a battery changes. Receivers show
+/// these one hop away and never forward them, so nothing can circulate stale.
+nonisolated struct BridgProtoPeers: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var peers: [BridgProtoPeer] = []
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+nonisolated struct BridgProtoPeer: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var info: BridgProtoDeviceInfo {
+    get {_info ?? BridgProtoDeviceInfo()}
+    set {_info = newValue}
+  }
+  /// Returns true if `info` has been explicitly set.
+  var hasInfo: Bool {self._info != nil}
+  /// Clears the value of `info`. Subsequent reads from it will return its default value.
+  mutating func clearInfo() {self._info = nil}
+
+  var connected: Bool = false
+
+  /// -1 when unknown (computers, old phones)
+  var batteryPercent: Int32 = 0
+
+  var charging: Bool = false
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+
+  fileprivate var _info: BridgProtoDeviceInfo? = nil
+}
+
 nonisolated struct BridgProtoPing: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1033,7 +1177,7 @@ fileprivate nonisolated let _protobuf_package = "bridg"
 
 nonisolated extension BridgProtoEnvelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".Envelope"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{4}\u{9}pair_request\0\u{3}pair_response\0\u{3}pair_resume\0\u{3}pair_resume_ack\0\u{4}\u{7}file_start\0\u{3}file_chunk\0\u{3}file_ack\0\u{3}file_cancel\0\u{2}\u{7}clipboard\0\u{2}\u{a}notification\0\u{3}notif_action\0\u{3}notif_dismiss\0\u{4}\u{8}input_event\0\u{4}\u{2}call_control\0\u{4}\u{8}video_frame\0\u{3}video_stream_start\0\u{3}video_stream_stop\0\u{3}audio_frame\0\u{4}\u{7}media_state\0\u{3}media_command\0\u{4}\u{9}device_status\0\u{3}remote_action\0\u{2}\u{13}ping\0\u{1}pong\0\u{c}n\u{1}\u{1}\u{c}o\u{1}\u{1}")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{4}\u{9}pair_request\0\u{3}pair_response\0\u{3}pair_resume\0\u{3}pair_resume_ack\0\u{4}\u{7}file_start\0\u{3}file_chunk\0\u{3}file_ack\0\u{3}file_cancel\0\u{2}\u{7}clipboard\0\u{2}\u{a}notification\0\u{3}notif_action\0\u{3}notif_dismiss\0\u{4}\u{8}input_event\0\u{4}\u{2}call_control\0\u{4}\u{8}video_frame\0\u{3}video_stream_start\0\u{3}video_stream_stop\0\u{3}audio_frame\0\u{4}\u{7}media_state\0\u{3}media_command\0\u{4}\u{9}device_status\0\u{3}remote_action\0\u{4}\u{9}device_info\0\u{1}peers\0\u{2}\u{9}ping\0\u{1}pong\0\u{c}n\u{1}\u{1}\u{c}o\u{1}\u{1}")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1328,6 +1472,32 @@ nonisolated extension BridgProtoEnvelope: SwiftProtobuf.Message, SwiftProtobuf._
           self.payload = .remoteAction(v)
         }
       }()
+      case 90: try {
+        var v: BridgProtoDeviceInfo?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .deviceInfo(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .deviceInfo(v)
+        }
+      }()
+      case 91: try {
+        var v: BridgProtoPeers?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .peers(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .peers(v)
+        }
+      }()
       case 100: try {
         var v: BridgProtoPing?
         var hadOneofValue = false
@@ -1455,6 +1625,14 @@ nonisolated extension BridgProtoEnvelope: SwiftProtobuf.Message, SwiftProtobuf._
     case .remoteAction?: try {
       guard case .remoteAction(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 81)
+    }()
+    case .deviceInfo?: try {
+      guard case .deviceInfo(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 90)
+    }()
+    case .peers?: try {
+      guard case .peers(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 91)
     }()
     case .ping?: try {
       guard case .ping(let v)? = self.payload else { preconditionFailure() }
@@ -2480,6 +2658,144 @@ nonisolated extension BridgProtoRemoteAction: SwiftProtobuf.Message, SwiftProtob
 
 nonisolated extension BridgProtoRemoteAction.Action: SwiftProtobuf._ProtoNameProviding {
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0ACTION_UNSPECIFIED\0\u{1}RING\0\u{1}STOP_RING\0\u{1}OPEN_URL\0")
+}
+
+nonisolated extension BridgProtoDeviceInfo: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".DeviceInfo"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}name\0\u{1}platform\0\u{3}app_version\0\u{3}os_version\0\u{1}model\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.id) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.name) }()
+      case 3: try { try decoder.decodeSingularEnumField(value: &self.platform) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.appVersion) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.osVersion) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.model) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.id.isEmpty {
+      try visitor.visitSingularStringField(value: self.id, fieldNumber: 1)
+    }
+    if !self.name.isEmpty {
+      try visitor.visitSingularStringField(value: self.name, fieldNumber: 2)
+    }
+    if self.platform != .unspecified {
+      try visitor.visitSingularEnumField(value: self.platform, fieldNumber: 3)
+    }
+    if !self.appVersion.isEmpty {
+      try visitor.visitSingularStringField(value: self.appVersion, fieldNumber: 4)
+    }
+    if !self.osVersion.isEmpty {
+      try visitor.visitSingularStringField(value: self.osVersion, fieldNumber: 5)
+    }
+    if !self.model.isEmpty {
+      try visitor.visitSingularStringField(value: self.model, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: BridgProtoDeviceInfo, rhs: BridgProtoDeviceInfo) -> Bool {
+    if lhs.id != rhs.id {return false}
+    if lhs.name != rhs.name {return false}
+    if lhs.platform != rhs.platform {return false}
+    if lhs.appVersion != rhs.appVersion {return false}
+    if lhs.osVersion != rhs.osVersion {return false}
+    if lhs.model != rhs.model {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension BridgProtoDeviceInfo.Platform: SwiftProtobuf._ProtoNameProviding {
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0PLATFORM_UNSPECIFIED\0\u{1}ANDROID\0\u{1}MACOS\0\u{1}WINDOWS\0\u{1}LINUX\0\u{1}IOS\0")
+}
+
+nonisolated extension BridgProtoPeers: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".Peers"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}peers\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeRepeatedMessageField(value: &self.peers) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.peers.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.peers, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: BridgProtoPeers, rhs: BridgProtoPeers) -> Bool {
+    if lhs.peers != rhs.peers {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension BridgProtoPeer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".Peer"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}info\0\u{1}connected\0\u{3}battery_percent\0\u{1}charging\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._info) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.connected) }()
+      case 3: try { try decoder.decodeSingularInt32Field(value: &self.batteryPercent) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.charging) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._info {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if self.connected != false {
+      try visitor.visitSingularBoolField(value: self.connected, fieldNumber: 2)
+    }
+    if self.batteryPercent != 0 {
+      try visitor.visitSingularInt32Field(value: self.batteryPercent, fieldNumber: 3)
+    }
+    if self.charging != false {
+      try visitor.visitSingularBoolField(value: self.charging, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: BridgProtoPeer, rhs: BridgProtoPeer) -> Bool {
+    if lhs._info != rhs._info {return false}
+    if lhs.connected != rhs.connected {return false}
+    if lhs.batteryPercent != rhs.batteryPercent {return false}
+    if lhs.charging != rhs.charging {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
 }
 
 nonisolated extension BridgProtoPing: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
