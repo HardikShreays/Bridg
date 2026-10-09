@@ -37,3 +37,17 @@ jobs:
       - name: Test
         working-directory: mac
         run: swift test
+
+  windows:
+    # The Windows hub. Its crypto tests pin the same vectors as the Mac and
+    # Android tests, so a drift in any of the three fails here.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+      - name: Test
+        working-directory: desktop/src-tauri
+        run: cargo test

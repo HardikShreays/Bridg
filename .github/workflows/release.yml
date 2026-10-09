@@ -74,8 +74,30 @@ jobs:
           name: dmg
           path: mac/build/Bridg.dmg
 
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Test
+        working-directory: desktop/src-tauri
+        run: cargo test
+
+      - name: Build installer
+        working-directory: desktop/src-tauri
+        run: npx --yes @tauri-apps/cli@2 build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+
   release:
-    needs: [android, mac]
+    needs: [android, mac, windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -85,4 +107,5 @@ jobs:
           files: |
             apk/app-release.apk
             dmg/Bridg.dmg
+            windows/*-setup.exe
           fail_on_unmatched_files: false

@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bridg</title>
+<style>
+  :root {
+    --bg: #f5f5f7; --card: #ffffff; --ink: #1d1d1f; --ink2: #6e6e73; --line: #e5e5ea;
+    --accent: #2f8cff; --accent2: #5e5ce6; --green: #34c759; --orange: #ff9f0a; --red: #ff3b30;
+    --field: #f2f2f5; --shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 16px rgba(0,0,0,.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161618; --card: #232326; --ink: #f5f5f7; --ink2: #a1a1a6; --line: #343438;
+      --field: #2c2c30; --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.45 "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased; user-select: none;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 16px 24px;
+    border-bottom: 1px solid var(--line); background: var(--card);
+  }
+  .mark { width: 36px; height: 36px; border-radius: 9px; background: linear-gradient(135deg, var(--accent), var(--accent2)); display: grid; place-items: center; }
+  header h1 { font-size: 17px; margin: 0; font-weight: 650; }
+  header .sub { color: var(--ink2); font-size: 12.5px; }
+  header .grow { flex: 1; }
+  button {
+    font: inherit; border: 0; border-radius: 8px; padding: 7px 12px; cursor: pointer;
+    background: var(--field); color: var(--ink);
+  }
+  button:hover { filter: brightness(.96); }
+  button.primary { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff; font-weight: 600; }
+  button.danger { color: var(--red); }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  input {
+    font: inherit; color: var(--ink); background: var(--field); border: 1px solid transparent;
+    border-radius: 8px; padding: 7px 10px; min-width: 0; user-select: text;
+  }
+  main { display: grid; grid-template-columns: minmax(280px, 340px) 1fr; gap: 20px; padding: 20px 24px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink2); margin: 0 0 10px; font-weight: 600; }
+  .card { background: var(--card); border-radius: 14px; box-shadow: var(--shadow); padding: 16px; margin-bottom: 14px; border: 1px solid var(--line); }
+  .phone.selected { border-color: var(--accent); }
+  .row { display: flex; align-items: center; gap: 8px; }
+  .row.wrap { flex-wrap: wrap; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--orange); flex: none; }
+  .dot.on { background: var(--green); }
+  .name { font-weight: 600; font-size: 15px; }
+  .muted { color: var(--ink2); font-size: 12.5px; }
+  .section { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+  .playing { display: flex; align-items: center; gap: 8px; }
+  .playing .what { flex: 1; min-width: 0; }
+  .ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .drop { border: 1.5px dashed var(--line); border-radius: 10px; padding: 12px; text-align: center; color: var(--ink2); font-size: 12.5px; }
+  .drop.hot { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .notif { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; padding: 12px 0; border-top: 1px solid var(--line); }
+  .notif:first-child { border-top: 0; padding-top: 0; }
+  .notif .app { font-size: 12px; color: var(--ink2); }
+  .notif .title { font-weight: 600; }
+  .notif .text { white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+  .notif .actions { grid-column: 1 / -1; display: flex; gap: 8px; margin-top: 6px; }
+  .notif .actions input { flex: 1; }
+  .x { background: none; color: var(--ink2); padding: 2px 6px; align-self: start; }
+  .empty { color: var(--ink2); text-align: center; padding: 28px 8px; }
+  .bar { height: 4px; border-radius: 2px; background: var(--field); overflow: hidden; margin-top: 6px; }
+  .bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); }
+  .error { color: var(--red); }
+  .pair { text-align: center; }
+  .pair .qr { background: #fff; border-radius: 12px; padding: 12px; display: inline-block; margin: 12px 0; }
+  .pair .qr svg { display: block; width: 240px; height: 240px; }
+  .banner { margin: 16px 24px 0; padding: 12px 14px; border-radius: 10px; background: color-mix(in srgb, var(--red) 12%, var(--card)); color: var(--ink); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <div class="mark" aria-hidden="true">
+    <svg width="26" height="26" viewBox="160 330 704 340" fill="none" stroke="#fff" stroke-linecap="round">
+      <path d="M371 440V612M512 382V612M653 440V612" stroke-width="40"/>
+      <path d="M230 612Q512 152 794 612M196 612H828" stroke-width="64"/>
+    </svg>
+  </div>
+  <div>
+    <h1>Bridg</h1>
+    <div class="sub" id="me">Starting…</div>
+  </div>
+  <div class="grow"></div>
+  <button class="primary" id="pairBtn">Pair a phone</button>
+</header>
+
+<div class="banner" id="error" hidden></div>
+
+<main>
+  <section>
+    <h2>Phones</h2>
+    <div id="phones"></div>
+    <div class="card pair" id="pairCard" hidden>
+      <div class="name">Scan with Bridg on your phone</div>
+      <div class="muted">Open Bridg on Android → Pair a new computer</div>
+      <div class="qr" id="qr"></div>
+      <div class="muted">This computer: <span id="pairAddr"></span></div>
+      <div class="row" style="justify-content:center;margin-top:12px">
+        <button id="cancelPair">Cancel</button>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Notifications</h2>
+    <div class="card" id="notifCard"><div class="empty" id="notifEmpty">Notifications from your phone show up here.</div><div id="notifs"></div></div>
+    <h2>Files</h2>
+    <div class="card">
+      <div class="drop" id="drop">Drop files on this window to send them to <span id="dropTarget">your phone</span>. Files from your phone land in Downloads.</div>
+      <div id="transfers"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+  const { invoke } = window.__TAURI__.core;
+  const { listen } = window.__TAURI__.event;
+  const $ = (id) => document.getElementById(id);
+
+  // Untrusted text (other apps' notifications) only ever goes in via textContent.
+  function el(tag, props = {}, ...children) {
+    const node = document.createElement(tag);
+    for (const [k, v] of Object.entries(props)) {
+      if (k === "class") node.className = v;
+      else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+      else if (k === "text") node.textContent = v;
+      else node.setAttribute(k, v);
+    }
+    for (const c of children) if (c != null) node.append(c);
+    return node;
+  }
+
+  let state = { phones: [] };
+  let selected = null;
+  const transfers = new Map();
+
+  const connected = () => state.phones.filter((p) => p.connected);
+  const target = () => connected().find((p) => p.id === selected) || connected()[0];
+
+  function renderPhones() {
+    const box = $("phones");
+    box.replaceChildren();
+    $("me").textContent = `${state.name} · ${state.address || "no network"}`;
+    if (state.error) { $("error").hidden = false; $("error").textContent = state.error; } else $("error").hidden = true;
+
+    if (!state.phones.length && $("pairCard").hidden) {
+      box.append(el("div", { class: "card empty" }, "No phone paired yet.", el("br"),
+        el("button", { class: "primary", style: "margin-top:12px", onclick: startPairing }, "Pair a phone")));
+    }
+    const t = target();
+    for (const p of state.phones) {
+      const card = el("div", { class: "card phone" + (t && t.id === p.id ? " selected" : ""), onclick: () => { selected = p.id; renderPhones(); } });
+      const battery = p.battery ? `${p.battery.percent}%${p.battery.charging ? " · charging" : ""}` : "";
+      card.append(el("div", { class: "row" },
+        el("span", { class: "dot" + (p.connected ? " on" : "") }),
+        el("span", { class: "name ellipsis", text: p.name }),
+        el("span", { class: "grow", style: "flex:1" }),
+        el("span", { class: "muted", text: p.connected ? battery : "Not connected" })));
+
+      if (p.connected) {
+        if (p.playing) {
+          const ctl = (a, label) => el("button", { onclick: (e) => { e.stopPropagation(); invoke("media", { device: p.id, action: a }); }, "aria-label": label }, label === "Previous" ? "⏮" : label === "Next" ? "⏭" : (p.playing.playing ? "⏸" : "▶"));
+          card.append(el("div", { class: "section playing" },
+            el("div", { class: "what" },
+              el("div", { class: "ellipsis", text: p.playing.title || p.playing.app }),
+              el("div", { class: "muted ellipsis", text: p.playing.artist || p.playing.app })),
+            ctl("previous", "Previous"), ctl("toggle", "Play or pause"), ctl("next", "Next")));
+        }
+        const url = el("input", { placeholder: "https://… open on phone", onclick: (e) => e.stopPropagation() });
+        const send = () => invoke("open_url", { device: p.id, url: url.value }).then((ok) => { if (ok) url.value = ""; else url.style.borderColor = "var(--red)"; });
+        url.addEventListener("keydown", (e) => { url.style.borderColor = ""; if (e.key === "Enter") send(); });
+        card.append(el("div", { class: "section row" }, url, el("button", { onclick: (e) => { e.stopPropagation(); send(); } }, "Open")));
+        card.append(el("div", { class: "section row wrap" },
+          el("button", { onclick: (e) => { e.stopPropagation(); invoke("ring", { device: p.id, on: true }); } }, "Ring phone"),
+          el("button", { onclick: (e) => { e.stopPropagation(); invoke("ring", { device: p.id, on: false }); } }, "Stop ringing"),
+          el("span", { style: "flex:1" }),
+          el("button", { class: "danger", onclick: (e) => { e.stopPropagation(); unpair(p); } }, "Unpair")));
+      } else {
+        card.append(el("div", { class: "section row" },
+          el("span", { class: "muted", style: "flex:1", text: "Open Bridg on the phone, on the same Wi-Fi." }),
+          el("button", { class: "danger", onclick: (e) => { e.stopPropagation(); unpair(p); } }, "Unpair")));
+      }
+      box.append(card);
+    }
+    $("dropTarget").textContent = t ? t.name : "your phone (none connected)";
+  }
+
+  function unpair(p) {
+    if (confirm(`Unpair ${p.name}? You will need to scan the QR code again.`)) invoke("unpair", { device: p.id });
+  }
+
+  async function startPairing() {
+    try {
+      const view = await invoke("start_pairing");
+      $("qr").innerHTML = view.svg; // generated by the app itself, not phone data
+      $("pairAddr").textContent = view.address || "no network";
+      $("pairCard").hidden = false;
+      renderPhones();
+    } catch (e) { $("error").hidden = false; $("error").textContent = String(e); }
+  }
+  function stopPairing() { invoke("cancel_pairing"); $("pairCard").hidden = true; renderPhones(); }
+  $("pairBtn").onclick = startPairing;
+  $("cancelPair").onclick = stopPairing;
+
+  function addNotification(n) {
+    document.querySelector(`[data-id="${CSS.escape(n.id)}"]`)?.remove();
+    const item = el("div", { class: "notif", "data-id": n.id });
+    item.append(el("div", {},
+      el("div", { class: "app", text: `${n.app} · ${new Date(n.time || Date.now()).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` }),
+      n.title ? el("div", { class: "title", text: n.title }) : null,
+      n.text ? el("div", { class: "text", text: n.text }) : null));
+    item.append(el("button", { class: "x", "aria-label": "Dismiss", onclick: () => { invoke("dismiss", { id: n.id }); item.remove(); refreshEmpty(); } }, "✕"));
+    if (n.is_call) {
+      item.append(el("div", { class: "actions" },
+        el("button", { class: "primary", onclick: () => invoke("call", { device: n.device, action: "answer" }) }, "Answer"),
+        el("button", { class: "danger", onclick: () => invoke("call", { device: n.device, action: "reject" }) }, "Decline")));
+    } else if (n.can_reply) {
+      const input = el("input", { placeholder: "Reply…" });
+      const send = () => { if (!input.value.trim()) return; invoke("reply", { id: n.id, text: input.value }).then((ok) => { if (ok) { input.value = ""; input.placeholder = "Sent"; } }); };
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
+      item.append(el("div", { class: "actions" }, input, el("button", { onclick: send }, "Send")));
+    }
+    $("notifs").prepend(item);
+    while ($("notifs").children.length > 100) $("notifs").lastChild.remove();
+    refreshEmpty();
+  }
+  function refreshEmpty() { $("notifEmpty").hidden = $("notifs").children.length > 0; }
+
+  function renderTransfer(t) {
+    const prev = transfers.get(t.id) || {};
+    t.name = t.name || prev.name || "file";
+    transfers.set(t.id, t);
+    let row = document.querySelector(`[data-t="${CSS.escape(t.id)}"]`);
+    if (!row) { row = el("div", { class: "section", "data-t": t.id }); $("transfers").prepend(row); }
+    const pct = t.total ? Math.round((t.done / t.total) * 100) : 0;
+    const status = t.error ? `Failed: ${t.error}` : t.finished ? (t.incoming ? "Saved to Downloads" : "Sent") : `${pct}%`;
+    row.replaceChildren(
+      el("div", { class: "row" },
+        el("span", { class: "ellipsis", style: "flex:1", text: `${t.incoming ? "↓" : "↑"} ${t.name}` }),
+        el("span", { class: t.error ? "muted error" : "muted", text: status })),
+      ...(t.finished ? [] : [el("div", { class: "bar" }, el("i", { style: `width:${pct}%` }))]));
+  }
+
+  listen("state", (e) => { state = e.payload; renderPhones(); });
+  listen("paired", () => { $("pairCard").hidden = true; });
+  listen("notification", (e) => addNotification(e.payload));
+  listen("notification-removed", (e) => { document.querySelector(`[data-id="${CSS.escape(e.payload)}"]`)?.remove(); refreshEmpty(); });
+  listen("transfer", (e) => renderTransfer(e.payload));
+
+  listen("tauri://drag-enter", () => $("drop").classList.add("hot"));
+  listen("tauri://drag-leave", () => $("drop").classList.remove("hot"));
+  listen("tauri://drag-drop", (e) => {
+    $("drop").classList.remove("hot");
+    const t = target();
+    if (!t) { $("error").hidden = false; $("error").textContent = "Connect a phone first, then drop files again."; return; }
+    invoke("send_files", { device: t.id, paths: e.payload.paths });
+  });
+
+  invoke("snapshot").then((s) => { state = s; renderPhones(); if (!s.phones.length) startPairing(); });
+</script>
+</body>
+</html>

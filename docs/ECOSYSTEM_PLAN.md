@@ -183,20 +183,42 @@ a computer only at its saved address; when that address changes, only a QR
 re-scan recovers. Phase 2 must not depend on Bonjour either — show the address
 on the hub and accept a typed-in one, or rescan on failure.
 
-### Phase 2 — Windows + Linux hub
+### Phase 2 — Windows hub ✅ built, verified against the real phone, ⏳ Windows gate
 
-- **Rust core** (framing, X25519 + HKDF + ChaCha20-Poly1305, protobuf via
-  `prost`, mDNS) pinned to the **same test vectors** the Mac and Android tests
-  already use.
-- **Tauri** shell for UI (WebView2 on Windows, WebKitGTK on Linux): one codebase
-  for both, and the core runs on this Mac too, so it can be tested against the
-  real phone before a Windows box is involved.
-- Feature order: pair/resume → clipboard → notifications + reply → files →
-  battery/ring/link/media → mirroring + input → calls (spike).
-- Chosen over C#/.NET: Windows-only, and .NET has no built-in X25519.
+`desktop/` — Rust core + Tauri shell; ships as an NSIS installer from the
+release workflow. Linux would build from the same code but is not in CI yet.
 
-**Gate:** Android ↔ Windows at parity with Android ↔ Mac (calls excepted), on a
-real Windows machine.
+- `crypto.rs`: HKDF, sealed transport, framing, hub tag — pinned to the **same
+  vectors** as the Mac and Android tests (it opens the phone's first frame and
+  reproduces it byte for byte).
+- `hub.rs`: listener, handshake with the Phase 0 rule built in, one sealed
+  session per phone (several at once), eviction only after the newcomer's first
+  sealed frame opens, ping/pong keepalive, Bonjour with TXT `name` + `id`.
+  Features: notifications + reply, call answer/decline, clipboard both ways
+  (text) with relay between phones, files both ways (`.part` until complete,
+  SHA-256 checked, never overwrites, phone can't pick the directory), battery,
+  media, ring, open link. Mirroring + input: not yet.
+- `store.rs`: identity in Windows Credential Manager (never regenerated on a
+  read error); paired phones in `%APPDATA%\Bridg\devices.json`.
+- Window UI: phones, notifications, files (drop to send); closing hides to tray.
+
+Verified 2026-10-09 by running it on the Mac against the Galaxy A35: QR
+pairing, resume, notifications, clipboard hub → phone, a 405 KB file
+phone → hub (MD5 identical), and the multi-computer picker on the phone.
+Type-checked for `x86_64-pc-windows-msvc`.
+
+Bugs this turned up, all fixed:
+- `mdns-sd` 0.13 panicked on a huge TTL from some device on the LAN (u32
+  overflow) and stopped advertising → 0.21.
+- The host name doubled up as `Name.local.local.` → strip the domain.
+- **Phone**: a lost session redialled immediately. With another computer at
+  the same address (DHCP reshuffle, or two Bridg hubs on one machine) it accepted
+  the resume, failed the first sealed frame and looped ~1,000 times in 15 min.
+  Now backs off 5 → 60 s, reset only by a frame that opens under the key.
+- **Phone**: no way to forget a computer → tap "N computers paired".
+
+**Gate:** on the owner's Windows PC: install, allow the firewall prompt, pair,
+then every feature above, with the Mac connected at the same time.
 
 ### Phase 3 — iPhone + iPad satellite — ⏸ deferred by owner (no Apple Developer membership)
 

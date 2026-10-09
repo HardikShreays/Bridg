@@ -2,13 +2,14 @@
 
 # Bridg
 
-**Android ↔ Mac Bridge** — Open source, MIT-licensed screen mirroring, file transfer, clipboard sync, and notification forwarding between Android phones and Macs.
+**Your Android phone, on your Mac and your PC** — open source, MIT-licensed screen mirroring, file transfer, clipboard sync, and notification forwarding between Android phones and Macs, plus a Windows app (beta).
 
 Built on proven capture approaches (inspired by scrcpy) with a custom protobuf-based transport layer and end-to-end encryption.
 
 ## Features
 
 - **Pairing**: One-time QR code pairing with X25519 key exchange, auto-reconnect
+- **Several computers**: One phone stays connected to a Mac and a Windows PC at once; notifications and clipboard reach all of them, and a copy on one computer can be pasted on the other
 - **File Transfer**: Drag-and-drop files between devices, SHA-256 verified
 - **Notifications**: Phone notifications appear natively on Mac, with reply support
 - **Clipboard Sync**: Copy on one device, paste on the other
@@ -25,6 +26,7 @@ Built on proven capture approaches (inspired by scrcpy) with a custom protobuf-b
 bridg/
 ├── android/        # Kotlin Android app (Gradle)
 ├── mac/            # Swift macOS app
+├── desktop/        # Windows app (Rust + Tauri), beta
 ├── proto/          # Shared protobuf protocol definitions
 └── docs/           # Protocol docs, design notes
 ```
@@ -63,6 +65,27 @@ the notification centre. `make_app.sh` wraps the build into `Bridg.app`.
 
 **Step-by-step setup, including pairing and permissions:
 see [RUNNING.md](RUNNING.md).**
+
+### Windows (beta)
+
+Download `Bridg_x.y.z_x64-setup.exe` from the [latest release](https://github.com/HardikShreays/Bridg/releases/latest),
+run it, and scan the QR code it shows with Bridg on the phone.
+
+- Works today: pairing, reconnect, notifications (with reply), call answer/decline,
+  clipboard both ways (text), files both ways (drop files on the window),
+  battery, media controls, ring phone, open links on the phone.
+- Not yet: screen mirroring and input control.
+- The installer is not code-signed yet, so SmartScreen warns on first run
+  (*More info → Run anyway*). Windows Firewall then asks whether Bridg may use
+  the network: allow **Private networks**, or the phone cannot connect.
+- Closing the window keeps Bridg running in the tray, so the phone stays connected.
+
+Build it with Rust and Node installed:
+```bash
+cd desktop/src-tauri
+cargo test                          # protocol tests, pinned to the Mac/Android vectors
+npx @tauri-apps/cli@2 build         # installer in target/release/bundle/nsis/
+```
 
 ### Protocol
 
