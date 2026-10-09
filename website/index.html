@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Bridg: your Android phone, at home on your Mac</title>
-<meta name="description" content="Free, open-source bridge between Android and macOS. Clipboard sync with images, file transfer, notifications with reply, calls, and screen mirroring, end-to-end encrypted over your local network.">
-<meta property="og:title" content="Bridg: Android ↔ Mac, finally friends">
-<meta property="og:description" content="Clipboard, files, notifications, calls and screen mirroring between your Android phone and your Mac. Open source, encrypted, no cloud.">
+<title>Bridg: your Android phone, on your Mac and PC</title>
+<meta name="description" content="Free, open-source bridge between your Android phone and your Mac or Windows PC. Clipboard sync, file transfer, notifications with reply, calls, and screen mirroring, end-to-end encrypted over your local network.">
+<meta property="og:title" content="Bridg: your Android phone, on every computer you own">
+<meta property="og:description" content="Clipboard, files, notifications and calls between your Android phone and your Mac and Windows PC, all at once. Open source, encrypted, no cloud.">
 <meta property="og:image" content="icon.png">
 <link rel="icon" href="icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -174,7 +174,11 @@ section{padding:100px 0}
 .card h3{font-size:21px;font-weight:700;margin-bottom:6px}
 .card p{margin:0;color:var(--ink2);font-size:15px}
 .card .viz{height:170px;margin:-6px -6px 22px;border-radius:16px;background:var(--bg2);position:relative;overflow:hidden;display:grid;place-items:center}
-.span3{grid-column:span 3}.span2{grid-column:span 2}
+.span3{grid-column:span 3}.span2{grid-column:span 2}.span6{grid-column:1/-1}
+.v-every{width:80%}.v-every .track{margin:0 10px}
+/* notifications travel phone → Mac, against the clipboard */
+.v-every .to-mac i:nth-child(2){animation-direction:reverse}
+@media (max-width:600px){.v-every{width:94%}.v-every .dev{width:44px;height:44px;border-radius:12px}.v-every .dev svg{width:22px;height:22px}.v-every .track{margin:0 6px}.v-every .track i span{display:none}}
 @media (max-width:900px){.bento{grid-template-columns:1fr 1fr}.span3,.span2{grid-column:span 1}}
 @media (max-width:600px){.bento{grid-template-columns:1fr}}
 
@@ -263,13 +267,13 @@ section{padding:100px 0}
 @media (max-width:860px){.trust{grid-template-columns:1fr;padding:44px 24px}}
 
 /* download */
-.dl{display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:860px;margin:0 auto}
+.dl{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;max-width:1080px;margin:0 auto}
 .dl .card{padding:34px;align-items:flex-start}
 .dl .os{width:52px;height:52px;border-radius:14px;background:var(--bg2);display:grid;place-items:center;margin-bottom:18px}
 .dl .os svg{width:28px;height:28px}
 .dl h3{font-size:24px}.dl p{margin:4px 0 22px}
 .dl small{display:block;margin-top:14px;color:var(--ink3);font-size:13px}
-@media (max-width:700px){.dl{grid-template-columns:1fr}}
+@media (max-width:900px){.dl{grid-template-columns:1fr}}
 
 footer{padding:40px 0 60px;border-top:1px solid var(--line);color:var(--ink3);font-size:14px}
 footer .wrap{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
@@ -302,13 +306,17 @@ footer a:hover{color:var(--ink)}
 
 <header class="hero">
   <div class="wrap">
-    <span class="pill"><b>NEW</b> Image clipboard sync &amp; one-click updates</span>
-    <h1>Your Android phone,<br><span class="grad">at home on your Mac.</span></h1>
-    <p class="lead">Copy on one, paste on the other. Drop files across. Reply to messages, answer calls and mirror your screen, all from the menu bar. Encrypted, local, and free.</p>
+    <span class="pill"><b>NEW</b> Bridg for Windows (beta) · one phone, every computer</span>
+    <h1>Your Android phone,<br><span class="grad">on your Mac&nbsp;&amp;&nbsp;PC.</span></h1>
+    <p class="lead">Copy on one, paste on the other. Drop files across. Reply to messages, answer calls and mirror your screen, on your Mac and your Windows PC at the same time. Encrypted, local, and free.</p>
     <div class="cta">
       <a class="btn btn-dark" href="https://github.com/HardikShreays/Bridg/releases/latest/download/Bridg.dmg">
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M16.37 1.43c0 1.14-.42 2.2-1.25 3.06-.9.93-2 1.47-3.18 1.38a3.3 3.3 0 0 1-.02-.42c0-1.1.48-2.27 1.33-3.14.42-.44.96-.8 1.61-1.09.65-.28 1.26-.44 1.84-.47.02.23.02.45.02.68h-.35zm4.2 16.3c-.36.83-.78 1.6-1.27 2.3-.67.96-1.22 1.62-1.64 1.99-.66.6-1.37.91-2.12.93-.54 0-1.19-.15-1.95-.46-.76-.31-1.46-.46-2.1-.46-.67 0-1.39.15-2.15.46-.77.31-1.39.47-1.86.49-.72.03-1.44-.29-2.16-.96-.46-.4-1.03-1.09-1.72-2.07a14.2 14.2 0 0 1-1.82-3.6A13.2 13.2 0 0 1 1 11.97c0-1.5.32-2.8.97-3.88a5.7 5.7 0 0 1 2.03-2.05 5.47 5.47 0 0 1 2.75-.78c.57 0 1.32.18 2.25.53.93.35 1.52.52 1.78.52.2 0 .86-.2 1.98-.62 1.06-.38 1.95-.54 2.68-.48 1.98.16 3.47.94 4.46 2.35-1.77 1.07-2.65 2.57-2.63 4.5.02 1.5.56 2.75 1.63 3.74.49.46 1.03.82 1.63 1.07-.13.38-.27.74-.42 1.09z"/></svg>
         Download for Mac
+      </a>
+      <a class="btn btn-dark" data-windows href="https://github.com/HardikShreays/Bridg/releases/latest">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.1 10.4 4v7.2H3zm0 13.8 7.4 1.1v-7.1H3zm8.3 1.2L21 21.5v-8.6h-9.7zm0-16.2v7.3H21V2.5z"/></svg>
+        Download for Windows
       </a>
       <a class="btn btn-light" href="https://github.com/HardikShreays/Bridg/releases/latest/download/app-release.apk">
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17.6 9.48l1.84-3.18a.38.38 0 0 0-.66-.38l-1.87 3.23a11.4 11.4 0 0 0-9.82 0L5.22 5.92a.38.38 0 0 0-.66.38L6.4 9.48A10.8 10.8 0 0 0 1 18h22a10.8 10.8 0 0 0-5.4-8.52zM7 15.25a1.25 1.25 0 1 1 0-2.5 1.25 1.25 0 0 1 0 2.5zm10 0a1.25 1.25 0 1 1 0-2.5 1.25 1.25 0 0 1 0 2.5z"/></svg>
@@ -316,7 +324,7 @@ footer a:hover{color:var(--ink)}
       </a>
     </div>
     <p style="margin:14px 0 0"><a href="https://youtu.be/qsm7TjypE4o" target="_blank" rel="noopener">▶ Watch the setup video</a></p>
-    <div class="fine">macOS 13+ · Android 8+ · MIT licensed · No account, no cloud</div>
+    <div class="fine">macOS 13+ · Windows 10 &amp; 11 (beta) · Android 8+ · MIT licensed · No account, no cloud</div>
 
     <div class="stage" id="stage" data-scene="0" aria-label="Animated demo of Bridg syncing between an Android phone and a Mac">
       <div class="mac">
@@ -396,10 +404,22 @@ footer a:hover{color:var(--ink)}
     <div class="sec-head reveal">
       <div class="eyebrow">Features</div>
       <h2>Everything your phone does, one glance away.</h2>
-      <p>Bridg lives in your menu bar and keeps both devices in step, quietly, over your own Wi-Fi.</p>
+      <p>Bridg lives in your menu bar or system tray and keeps every device in step, quietly, over your own Wi-Fi.</p>
     </div>
 
     <div class="bento">
+      <div class="card span6 reveal">
+        <div class="viz"><div class="v-clip v-every">
+          <div class="dev" title="Mac"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="4" width="16" height="11" rx="2"/><path d="M2 19h20"/></svg></div>
+          <div class="track to-mac"><i>📋<span> Copied on Mac</span></i><i>🔔<span> Mom: dinner?</span></i></div>
+          <div class="dev" title="Android phone"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M11 18h2"/></svg></div>
+          <div class="track"><i>📋<span> Pasted on PC</span></i><i>🔔<span> Mom: dinner?</span></i></div>
+          <div class="dev" title="Windows PC"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div>
+        </div></div>
+        <h3>One phone, every computer</h3>
+        <p>Keep your phone connected to your Mac and your Windows PC at the same time. Notifications reach both, and something copied on one computer can be pasted on the other. Sending a file? Pick which computer gets it.</p>
+      </div>
+
       <div class="card span3 reveal">
         <div class="viz"><div class="v-clip">
           <div class="dev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M11 18h2"/></svg></div>
@@ -419,7 +439,7 @@ footer a:hover{color:var(--ink)}
           </div>
         </div></div>
         <h3>Drag-and-drop file transfer</h3>
-        <p>Share to Bridg from any Android app, or drop files on the Mac. Every byte is checksum-verified at full LAN speed.</p>
+        <p>Share to Bridg from any Android app, or drop files on your Mac or PC. Every byte is checksum-verified at full LAN speed.</p>
       </div>
 
       <div class="card span2 reveal">
@@ -428,7 +448,7 @@ footer a:hover{color:var(--ink)}
           <div class="mnotif"><div class="app">W</div><div><b>Mom</b>Call me when free ❤️</div></div>
         </div></div>
         <h3>Notifications with reply</h3>
-        <p>Phone notifications show up as native macOS banners. Reply without picking up your phone.</p>
+        <p>Phone notifications show up as native macOS and Windows banners. Reply without picking up your phone.</p>
       </div>
 
       <div class="card span2 reveal">
@@ -440,7 +460,7 @@ footer a:hover{color:var(--ink)}
           </div></div>
         </div></div>
         <h3>Screen mirroring &amp; control</h3>
-        <p>Low-latency H.264 mirror with audio. Click, type and scroll your phone from the Mac.</p>
+        <p>Low-latency H.264 mirror with audio. Click, type and scroll your phone from the Mac. Coming to Windows.</p>
       </div>
 
       <div class="card span2 reveal">
@@ -482,8 +502,8 @@ footer a:hover{color:var(--ink)}
       <p>No sign-up and no cables. Scan once and it reconnects by itself from then on.</p>
     </div>
     <div class="steps">
-      <div class="step reveal"><h3>Install both apps</h3><p>Grab Bridg for Mac and the Android APK below. Both are free and open source.</p></div>
-      <div class="step reveal"><h3>Scan the QR code</h3><p>Open Bridg on your Mac, then scan the code with your phone. Keys are exchanged right there.</p><div class="qr"></div></div>
+      <div class="step reveal"><h3>Install the apps</h3><p>Grab Bridg for your Mac or Windows PC (or both) and the Android APK below. All free and open source.</p></div>
+      <div class="step reveal"><h3>Scan the QR code</h3><p>Open Bridg on your computer, then scan the code with your phone. Keys are exchanged right there. Repeat for each computer.</p><div class="qr"></div></div>
       <div class="step reveal"><h3>That's it</h3><p>Same Wi-Fi? You're connected. Updates are one click, via <em>Check for updates</em> in either app.</p></div>
     </div>
   </div>
@@ -502,7 +522,7 @@ footer a:hover{color:var(--ink)}
         <li><span class="k">✓</span><div><b>End-to-end encrypted.</b> <code>X25519</code> pairing, a new session key on every connect.</div></li>
         <li><span class="k">✓</span><div><b>Local network only.</b> Bonjour discovery, straight TCP between devices. Nothing is relayed.</div></li>
         <li><span class="k">✓</span><div><b>Open source, MIT.</b> Read every line on GitHub, or build it yourself.</div></li>
-        <li><span class="k">✓</span><div><b>Lightweight.</b> A native Swift menu bar app and a Kotlin service. No Electron.</div></li>
+        <li><span class="k">✓</span><div><b>Lightweight.</b> A native Swift menu bar app, a Rust app on Windows, and a Kotlin service. No Electron.</div></li>
       </ul>
     </div>
   </div>
@@ -513,7 +533,7 @@ footer a:hover{color:var(--ink)}
     <div class="sec-head reveal">
       <div class="eyebrow">Download</div>
       <h2>Get Bridg. It's free.</h2>
-      <p>Install on both devices, then pair.</p>
+      <p>Install on your phone and your computers, then pair.</p>
     </div>
     <div class="dl">
       <div class="card reveal">
@@ -522,6 +542,13 @@ footer a:hover{color:var(--ink)}
         <p>Menu bar app for macOS 13 Ventura and later. Apple silicon and Intel.</p>
         <a class="btn btn-dark" href="https://github.com/HardikShreays/Bridg/releases/latest/download/Bridg.dmg">Download .dmg</a>
         <small>Open the DMG and drag Bridg into Applications.</small>
+      </div>
+      <div class="card reveal">
+        <div class="os" style="color:#0078d4"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.1 10.4 4v7.2H3zm0 13.8 7.4 1.1v-7.1H3zm8.3 1.2L21 21.5v-8.6h-9.7zm0-16.2v7.3H21V2.5z"/></svg></div>
+        <h3>Bridg for Windows <span style="font-size:13px;font-weight:600;color:var(--ink3);vertical-align:middle">BETA</span></h3>
+        <p>For Windows 10 and 11. Lives in the system tray. Mirroring is not in this version yet.</p>
+        <a class="btn btn-dark" data-windows href="https://github.com/HardikShreays/Bridg/releases/latest">Download installer</a>
+        <small>Not code-signed yet: choose <em>More info → Run anyway</em>, then allow Bridg on private networks when Windows Firewall asks.</small>
       </div>
       <div class="card reveal">
         <div class="os" style="color:#3ddc84"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M17.6 9.48l1.84-3.18a.38.38 0 0 0-.66-.38l-1.87 3.23a11.4 11.4 0 0 0-9.82 0L5.22 5.92a.38.38 0 0 0-.66.38L6.4 9.48A10.8 10.8 0 0 0 1 18h22a10.8 10.8 0 0 0-5.4-8.52zM7 15.25a1.25 1.25 0 1 1 0-2.5 1.25 1.25 0 0 1 0 2.5zm10 0a1.25 1.25 0 1 1 0-2.5 1.25 1.25 0 0 1 0 2.5z"/></svg></div>
@@ -557,6 +584,17 @@ let scene = 0;
 setInterval(() => { scene = (scene + 1) % 4; stage.dataset.scene = scene; }, 4400);
 stage.querySelectorAll('.caption span').forEach((el, i) =>
   el.addEventListener('click', () => { scene = i; stage.dataset.scene = i; }));
+
+// The Windows installer's name carries its version, so there is no fixed
+// latest/download link. Ask GitHub for the newest one; on any failure the
+// buttons keep pointing at the releases page.
+fetch('https://api.github.com/repos/HardikShreays/Bridg/releases/latest')
+  .then(r => r.ok ? r.json() : null)
+  .then(rel => {
+    const exe = rel && rel.assets.find(a => a.name.endsWith('-setup.exe'));
+    if (exe) document.querySelectorAll('[data-windows]').forEach(a => a.href = exe.browser_download_url);
+  })
+  .catch(() => {});
 
 // Fade sections in as they scroll into view.
 const io = new IntersectionObserver(es => es.forEach(e => {
