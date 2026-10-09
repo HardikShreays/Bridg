@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Status-bar icon: the Bridg mark alone, white on transparent. Android draws
+     small icons as a silhouette, so the full-colour launcher icon showed as a
+     blank disc. Same coordinates as assets/logo.svg; deck scaled to 20dp. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <group
+        android:scaleX="0.03165"
+        android:scaleY="0.03165"
+        android:translateX="-4.203"
+        android:translateY="-3.73">
+        <path
+            android:pathData="M371,440 V612 M512,382 V612 M653,440 V612"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="44"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M230,612 Q512,152 794,612 M196,612 H828"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="66"
+            android:strokeLineCap="round" />
+    </group>
+</vector>

@@ -1,3 +1,5 @@
+<img src="assets/logo.svg" width="96" alt="Bridg logo">
+
 # Bridg
 
 **Android ↔ Mac Bridge** — Open source, MIT-licensed screen mirroring, file transfer, clipboard sync, and notification forwarding between Android phones and Macs.

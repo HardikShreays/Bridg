@@ -1,11 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- The Bridg mark, in assets/logo.svg's own coordinates. The group maps the
+     SVG's 824-unit tile onto the 72dp a launcher mask shows, which keeps the
+     mark inside the 66dp safe zone. Strokes scale with the group. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Simple "B" letter shape for Bridg -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M38,30 L38,78 L58,78 C66,78 72,72 72,64 C72,58 68,53 62,51 C67,49 70,44 70,39 C70,32 65,30 58,30 Z M48,38 L56,38 C60,38 62,40 62,44 C62,48 60,50 56,50 L48,50 Z M48,58 L58,58 C62,58 64,60 64,64 C64,68 62,70 58,70 L48,70 Z"/>
+    <group
+        android:scaleX="0.08738"
+        android:scaleY="0.08738"
+        android:translateX="9.262"
+        android:translateY="9.262">
+        <path
+            android:pathData="M371,440 V612 M512,382 V612 M653,440 V612"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="34"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M230,612 Q512,152 794,612 M196,612 H828"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="58"
+            android:strokeLineCap="round" />
+    </group>
 </vector>
