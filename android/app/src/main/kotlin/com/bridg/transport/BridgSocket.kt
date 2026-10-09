@@ -223,7 +223,18 @@ class BridgSocket {
                         lost(s, IOException("frame rejected"))
                         break
                     }
-                    receiveListener?.invoke(Envelope.parseFrom(bytes))
+                    val envelope = Envelope.parseFrom(bytes)
+                    // Before the session key exists the only thing the peer
+                    // may say is its half of the handshake. We dial anything on
+                    // the LAN that advertises _bridg._tcp, so anything else here
+                    // is unauthenticated — and used to reach the input,
+                    // call-control and open-URL handlers as if from the Mac.
+                    if (transport == null && !envelope.isHandshakeReply()) {
+                        Log.e(TAG, "Plaintext ${envelope.payloadCase} before the handshake — dropping connection")
+                        lost(s, IOException("unauthenticated frame"))
+                        break
+                    }
+                    receiveListener?.invoke(envelope)
                 } catch (e: IOException) {
                     if (isActive) {
                         Log.e(TAG, "Receive error: ${e.message}")
@@ -256,6 +267,9 @@ class BridgSocket {
 
     private fun Envelope.isHandshake() =
         payloadCase == Envelope.PayloadCase.PAIR_REQUEST || payloadCase == Envelope.PayloadCase.PAIR_RESUME
+
+    private fun Envelope.isHandshakeReply() =
+        payloadCase == Envelope.PayloadCase.PAIR_RESPONSE || payloadCase == Envelope.PayloadCase.PAIR_RESUME_ACK
 
     interface ConnectionListener {
         fun onConnected()

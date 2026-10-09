@@ -135,7 +135,12 @@ final class ConnectionManager {
             listener.service = NWListener.Service(
                 name: "Bridg-\(Self.deviceName)",
                 type: "_bridg._tcp",
-                txtRecord: NWTXTRecord(["name": Self.deviceName])
+                txtRecord: NWTXTRecord([
+                    "name": Self.deviceName,
+                    // Lets a phone paired with several computers dial only its
+                    // own and know which one it reached.
+                    "id": Self.hubTag(publicKey: keychainManager.getOrCreatePublicKey()),
+                ])
             )
 
             listener.newConnectionHandler = { [weak self] connection in
@@ -302,6 +307,16 @@ final class ConnectionManager {
                 continue
             }
 
+            // Before the session key exists the only thing a peer may say is
+            // the handshake. Anything on the LAN can open this port, and a
+            // plaintext clipboard, notification or file frame used to reach the
+            // feature handlers as if it came from the paired phone.
+            if encryptedTransport == nil, !Self.allowedBeforeHandshake(envelope) {
+                print("Plaintext \(envelope.payload.map(String.init(describing:)) ?? "frame") before the handshake — dropping connection")
+                connection?.cancel()
+                return
+            }
+
             if handleTransportMessage(envelope) { continue }
 
             // Decode on this queue rather than shipping the frame to the main
@@ -316,6 +331,14 @@ final class ConnectionManager {
     }
 
     // MARK: - Handshake + keepalive
+
+    /// The only frames a peer may send before the session is encrypted.
+    static func allowedBeforeHandshake(_ envelope: BridgProtoEnvelope) -> Bool {
+        switch envelope.payload {
+        case .pairRequest, .pairResume: return true
+        default: return false
+        }
+    }
 
     /// Returns true when the message was consumed by the transport layer itself.
     private func handleTransportMessage(_ envelope: BridgProtoEnvelope) -> Bool {
@@ -422,4 +445,10 @@ final class ConnectionManager {
     }
 
     static var deviceName: String { Host.current().localizedName ?? "Mac" }
+
+    /// Hex of the first 8 bytes of SHA-256(public key), advertised as TXT `id`.
+    /// Must match KeyManager.hubTag on Android.
+    static func hubTag(publicKey: Data) -> String {
+        SHA256.hash(data: publicKey).prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
 }

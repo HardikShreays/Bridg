@@ -151,12 +151,25 @@ class MainActivity : AppCompatActivity() {
         sendUris(uris)
     }
 
+    /** With more than one computer paired, ask which one gets the files. */
     private fun sendUris(uris: List<android.net.Uri>) {
         if (uris.isEmpty()) return
+        val hubs = keyManager.getPairedDevices().entries.sortedBy { it.value.name }
+        if (hubs.size <= 1) return sendUris(uris, hubs.firstOrNull()?.key, hubs.firstOrNull()?.value?.name)
+        AlertDialog.Builder(this)
+            .setTitle("Send to")
+            .setItems(hubs.map { it.value.name.ifEmpty { "Computer" } }.toTypedArray()) { _, which ->
+                sendUris(uris, hubs[which].key, hubs[which].value.name)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun sendUris(uris: List<android.net.Uri>, hubId: String?, hubName: String?) {
 
         // No connected check here: a share usually cold-starts this activity,
         // before the service has even bound, so the old gate dropped every
-        // shared file. BridgService queues until the Mac session is up.
+        // shared file. BridgService queues until that computer's session is up.
         for (uri in uris) {
             // Best-effort: hold the read grant past this call. BridgService
             // opens the Uri moments later on its own thread, and a transient
@@ -170,9 +183,10 @@ class MainActivity : AppCompatActivity() {
             startForegroundService(Intent(this, BridgService::class.java).apply {
                 action = BridgService.ACTION_SEND_FILE
                 putExtra(BridgService.EXTRA_FILE_URI, uri.toString())
+                putExtra(BridgService.EXTRA_HUB_ID, hubId)
             })
         }
-        Toast.makeText(this, "Sending ${uris.size} file(s) to your Mac", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "Sending ${uris.size} file(s) to ${hubName?.ifEmpty { null } ?: "your computer"}", Toast.LENGTH_SHORT).show()
     }
 
     override fun onDestroy() {
@@ -293,8 +307,8 @@ class MainActivity : AppCompatActivity() {
         val paired = keyManager.getPairedDevices().size
         binding.pairedCountText.text = when (paired) {
             0 -> getString(R.string.paired_none)
-            1 -> "1 Mac paired"
-            else -> "$paired Macs paired"
+            1 -> "1 computer paired"
+            else -> "$paired computers paired"
         }
 
         bridgService?.let { binding.statusText.text = it.statusText }

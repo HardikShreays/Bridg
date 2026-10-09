@@ -31,11 +31,6 @@ class FileTransferManager(private val context: Context) {
     private val pendingUris = ConcurrentHashMap<String, Uri>()
     private var transferListener: TransferListener? = null
 
-    /** Set by BridgService. Without it, chunks were built and then discarded. */
-    private var envelopeSender: ((Envelope) -> Unit)? = null
-
-    fun setEnvelopeSender(sender: (Envelope) -> Unit) { envelopeSender = sender }
-
     fun setTransferListener(listener: TransferListener) { transferListener = listener }
 
     /** Acks from the Mac while we are sending. */
@@ -56,9 +51,12 @@ class FileTransferManager(private val context: Context) {
     }
 
     /**
-     * Start sending a file.
+     * Start sending a file. [send] carries it to one computer: the phone may
+     * be linked to several, and a file goes to the one the user picked. It
+     * should block when the socket is behind, or a fast disk read outruns it
+     * and chunks get dropped.
      */
-    fun startSend(inputStream: InputStream, filename: String, size: Long, mimeType: String) {
+    fun startSend(inputStream: InputStream, filename: String, size: Long, mimeType: String, send: (Envelope) -> Unit) {
         val transferId = UUID.randomUUID().toString()
 
         val state = TransferState(
@@ -73,7 +71,7 @@ class FileTransferManager(private val context: Context) {
 
         // Announce the transfer before streaming: the receiver needs the name
         // and size to open a file at all.
-        envelopeSender?.invoke(
+        send(
             Envelope.newBuilder().setFileStart(
                 FileTransferStart.newBuilder()
                     .setTransferId(transferId)
@@ -87,7 +85,7 @@ class FileTransferManager(private val context: Context) {
         // Start the transfer in a coroutine
         Thread {
             try {
-                sendFile(inputStream, state)
+                sendFile(inputStream, state, send)
             } catch (e: Exception) {
                 Log.e(TAG, "Send error: ${e.message}")
                 state.error = e.message
@@ -285,7 +283,7 @@ class FileTransferManager(private val context: Context) {
     private fun sanitize(filename: String): String =
         File(filename).name.replace(Regex("""[/\\:*?"<>|]"""), "_").ifEmpty { "file" }
 
-    private fun sendFile(inputStream: InputStream, state: TransferState) {
+    private fun sendFile(inputStream: InputStream, state: TransferState, send: (Envelope) -> Unit) {
         val buffer = ByteArray(CHUNK_SIZE)
         var offset = 0L
 
@@ -309,7 +307,7 @@ class FileTransferManager(private val context: Context) {
                     .setFileChunk(chunk)
                     .build()
 
-                envelopeSender?.invoke(envelope)
+                send(envelope)
                 transferListener?.onChunkSent(state.transferId, offset, state.expectedSize)
 
                 offset += bytesRead

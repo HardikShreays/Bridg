@@ -137,7 +137,7 @@ class RemoteActionHandler(private val context: Context) {
             .setContentTitle("Link from your Mac")
             .setContentText(url)
             .setStyle(Notification.BigTextStyle().bigText(url))
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_bridg)
             .setContentIntent(view)
             .setAutoCancel(true)
             .build()

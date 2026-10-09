@@ -6,7 +6,6 @@ import com.bridg.proto.PairResponse
 import com.bridg.proto.PairResume
 import com.google.protobuf.ByteString
 import java.util.Base64
-import java.util.UUID
 
 /**
  * The pairing flow. The Mac shows a QR code containing its public key and a
@@ -65,8 +64,7 @@ class PairingManager(
     }
 
     fun completePairing(peerPublicKey: ByteArray, deviceName: String): String {
-        val deviceId = UUID.randomUUID().toString()
-        keyManager.savePairedDevice(deviceId, peerPublicKey, deviceName)
+        val deviceId = keyManager.savePairedDevice(peerPublicKey, deviceName)
         Log.i(TAG, "Paired with device: $deviceName ($deviceId)")
         return deviceId
     }

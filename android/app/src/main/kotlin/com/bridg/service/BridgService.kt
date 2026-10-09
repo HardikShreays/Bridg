@@ -38,21 +38,21 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * Foreground service that owns the link to the Mac and every feature that
- * rides on it: pairing, clipboard, notifications, file transfer, screen capture.
+ * Foreground service that owns the links to every paired computer (Mac,
+ * Windows, Linux) and every feature that rides on them: pairing, clipboard,
+ * notifications, file transfer, screen capture.
  */
-class BridgService : Service(), BridgSocket.ConnectionListener {
+class BridgService : Service() {
 
     private val binder = LocalBinder()
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    /** The one pending redial after a failed connect; see [scheduleRetry]. */
-    private var retryJob: Job? = null
-
     private lateinit var keyManager: KeyManager
     private lateinit var pairingManager: PairingManager
-    private lateinit var bridgSocket: BridgSocket
     private lateinit var serviceDiscovery: ServiceDiscovery
+
+    /** One link per paired (or pairing) computer, keyed by [KeyManager.hubTag]. */
+    private val links = java.util.concurrent.ConcurrentHashMap<String, HubLink>()
 
     private lateinit var screenCapture: ScreenCapture
     private lateinit var audioCapture: AudioCapture
@@ -65,23 +65,6 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
     private var mediaProjection: MediaProjection? = null
     private var isServiceRunning = false
 
-    /** Set by PairingActivity after a successful QR scan; consumed on next connect. */
-    @Volatile private var pendingPairing: PairingManager.QRData? = null
-
-    /**
-     * Our fresh salt for the connection currently handshaking. The Mac's half
-     * arrives in its reply, and the session key needs both — see
-     * [com.bridg.pairing.SessionKdf.deriveSessionKey].
-     */
-    @Volatile private var sessionSalt: ByteArray? = null
-    @Volatile private var connected = false
-
-    /** True once the session key is set; before that BridgSocket drops everything. */
-    @Volatile private var sessionReady = false
-
-    /** Files shared while the Mac session wasn't up yet; flushed by [onSessionReady]. */
-    private val pendingShares = java.util.Collections.synchronizedList(mutableListOf<android.net.Uri>())
-
     /** Last reported send percentage, so progress doesn't respam the notification. */
     @Volatile private var lastSendPercent = -1
 
@@ -89,7 +72,7 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
     @Volatile private var callRinging = false
 
     /** Observed by MainActivity for the status line. */
-    @Volatile var statusText: String = "Searching for Mac…"
+    @Volatile var statusText: String = "Searching…"
         private set
     var onStatusChanged: ((String) -> Unit)? = null
 
@@ -99,7 +82,6 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
 
         keyManager = KeyManager(this)
         pairingManager = PairingManager(keyManager)
-        bridgSocket = BridgSocket()
         serviceDiscovery = ServiceDiscovery(this)
         screenCapture = ScreenCapture(this)
         audioCapture = AudioCapture()
@@ -109,13 +91,11 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
         batteryMonitor = BatteryMonitor(this)
         remoteActions = RemoteActionHandler(this)
 
-        bridgSocket.setConnectionListener(this)
-        bridgSocket.setReceiveListener { envelope -> handleIncomingEnvelope(envelope) }
-
-        // Without this the manager built chunks and discarded them. Use the
-        // blocking path so a fast disk read can't outrun the socket and get
-        // chunks dropped — that was the "file transfer works sometimes" bug.
-        fileTransferManager.setEnvelopeSender { envelope -> bridgSocket.sendBlocking(envelope) }
+        for ((id, device) in keyManager.getPairedDevices()) {
+            val link = HubLink(java.util.Base64.getDecoder().decode(device.publicKey), device.name.ifEmpty { "computer" }, id)
+            links[link.tag] = link
+        }
+        statusText = connectionSummary()
 
         // Nothing ever set a listener, so every transfer outcome — finished,
         // failed, rejected by the Mac — went nowhere and the status line sat on
@@ -136,7 +116,7 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
 
             override fun onTransferCompleted(transferId: String) {
                 lastSendPercent = -1
-                updateStatus(if (connected) "Connected to Mac" else "Transfer complete")
+                updateStatus(if (isConnected()) connectionSummary() else "Transfer complete")
             }
 
             override fun onTransferError(transferId: String, error: String) {
@@ -163,12 +143,16 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
                 val name = intent.getStringExtra(EXTRA_PEER_NAME) ?: "Mac"
                 val host = intent.getStringExtra(EXTRA_PEER_HOST).orEmpty()
                 if (key != null && token != null) {
-                    pendingPairing = PairingManager.QRData(Base64.decode(key, Base64.NO_WRAP), token, host, name)
-                    if (host.isNotEmpty()) keyManager.setLastHost(host)
+                    val qr = PairingManager.QRData(Base64.decode(key, Base64.NO_WRAP), token, host, name)
+                    // Re-scanning a computer we already know replaces its link so
+                    // the handshake runs from a clean socket; the others stay up.
+                    val tag = KeyManager.hubTag(qr.publicKey)
+                    val old = links.remove(tag)
+                    old?.close()
+                    val link = HubLink(qr.publicKey, name, old?.deviceId, pairing = qr)
+                    links[tag] = link
                     updateStatus("Pairing with $name…")
-                    // Restart the link so the handshake runs from a clean socket.
-                    bridgSocket.disconnect()
-                    connectToKnownHost()
+                    link.dial()
                 }
             }
             ACTION_START_CAPTURE -> {
@@ -184,10 +168,10 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
             }
             ACTION_SEND_FILE -> {
                 val uri = intent.getStringExtra(EXTRA_FILE_URI)
-                if (uri != null) queueOrSend(android.net.Uri.parse(uri))
+                if (uri != null) queueOrSend(android.net.Uri.parse(uri), intent.getStringExtra(EXTRA_HUB_ID))
                 else intent.getStringExtra(EXTRA_FILE_PATH)?.let { sendFile(it) }
             }
-            ACTION_DISCONNECT -> bridgSocket.disconnect()
+            ACTION_DISCONNECT -> links.values.forEach { it.socket.disconnect() }
         }
 
         return START_STICKY
@@ -201,7 +185,8 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
         super.onDestroy()
     }
 
-    fun isConnected(): Boolean = connected
+    /** True when at least one computer has a live, encrypted session. */
+    fun isConnected(): Boolean = links.values.any { it.ready }
 
     fun pairedDeviceCount(): Int = keyManager.getPairedDevices().size
 
@@ -234,103 +219,64 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
         batteryMonitor.stop()
         remoteActions.stopRing()
         serviceDiscovery.stopDiscovery()
-        bridgSocket.disconnect()
+        links.values.forEach { it.close() }
 
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
         Log.i(TAG, "Bridg service stopped")
     }
 
-    /**
-     * Dial the last address we saw the Mac at.
-     *
-     * mDNS is link-local multicast: on a segmented network (campus, office,
-     * guest Wi-Fi) the phone and Mac can route to each other fine while
-     * discovery finds nothing at all. The QR code carries the Mac's address for
-     * exactly this reason, and we keep using it on later reconnects.
-     */
-    private fun connectToKnownHost() {
-        if (connected) return
-        val host = pendingPairing?.host?.ifEmpty { null } ?: keyManager.getLastHost() ?: return
-        scope.launch {
-            if (!connected) {
-                Log.i(TAG, "Trying known host $host:$DEFAULT_PORT")
-                bridgSocket.connect(host, DEFAULT_PORT)
-            }
-        }
-    }
-
     private fun startDiscovery() {
-        // Both paths race; whichever lands first wins and the other is a no-op.
-        connectToKnownHost()
+        // Known-host dials and discovery race; whichever lands first wins and
+        // the other is a no-op (BridgSocket.connect refuses a second dial).
+        links.values.forEach { it.dial() }
 
         serviceDiscovery.startDiscovery(
             onFound = { serviceInfo ->
-                if (connected) return@startDiscovery
+                if (links.values.all { it.connected }) return@startDiscovery
                 serviceDiscovery.resolveService(serviceInfo,
-                    onResolved = { host, port ->
-                        if (connected) return@resolveService
-                        host.hostAddress?.let { keyManager.setLastHost(it) }
-                        // runBlocking on a pooled thread used to stall the executor;
-                        // a coroutine on the IO dispatcher is the right tool here.
-                        scope.launch { bridgSocket.connect(host.hostAddress ?: return@launch, port) }
+                    onResolved = { host, port, tag ->
+                        val link = linkFor(tag) ?: return@resolveService
+                        val address = host.hostAddress ?: return@resolveService
+                        if (link.connected) return@resolveService
+                        link.deviceId?.let { keyManager.setHost(it, address) }
+                        link.dial(address, port)
                     },
                     onFailed = { error -> Log.e(TAG, "Failed to resolve service: $error") }
                 )
             },
-            onLost = { Log.d(TAG, "Mac lost: ${it.serviceName}") }
+            onLost = { Log.d(TAG, "Computer lost: ${it.serviceName}") }
         )
     }
 
-    /**
-     * Announce ourselves as soon as the socket is up: a fresh pairing if the user
-     * just scanned a QR, otherwise a resume against the key we already hold.
-     */
-    private fun startHandshake() {
-        // A fresh salt per connection. Encryption cannot start until the Mac
-        // sends its own half back, so both frames below go out in the clear.
-        val salt = SessionKdf.randomSalt()
-        sessionSalt = salt
-
-        val pairing = pendingPairing
-        if (pairing != null) {
-            val envelope = Envelope.newBuilder()
-                .setPairRequest(pairingManager.createPairRequest(pairing.token, salt))
-                .build()
-            bridgSocket.send(envelope)
-            return
-        }
-
-        if (keyManager.getPairedPeerPublicKey() == null) {
-            updateStatus("Not paired — scan the QR code on your Mac")
-            return
-        }
-
-        bridgSocket.send(Envelope.newBuilder().setPairResume(pairingManager.createPairResume(salt)).build())
+    /** Rebuild the browse so a fresh resolve fires and lost links dial back in. */
+    private fun restartDiscovery() {
+        serviceDiscovery.stopDiscovery()
+        startDiscovery()
     }
 
     /**
-     * Session key for this connection, from the Mac's salt and the one we sent.
-     * Null if the Mac sent none — an old build whose key would repeat on every
-     * reconnect, which is exactly what the salts prevent.
+     * The link a discovered service belongs to. Hubs advertise their
+     * [KeyManager.hubTag] in TXT `id`; Mac builds from before multi-hub don't,
+     * and are only safe to guess at when a single computer is known. Anything
+     * else on the LAN advertising _bridg._tcp is not ours and is never dialled.
      */
-    private fun sessionKeyFor(peerKey: ByteArray, macSalt: ByteString): ByteArray? {
-        val ourSalt = sessionSalt
-        if (ourSalt == null || macSalt.size() != SessionKdf.SALT_LENGTH) {
-            Log.e(TAG, "Handshake carried no session salt — refusing to connect")
-            updateStatus("Mac app is out of date — update it")
-            bridgSocket.disconnect()
-            return null
-        }
-        sessionSalt = null
-        return keyManager.deriveSharedSecret(
-            peerKey,
-            SessionKdf.connectionInfo(initiatorSalt = ourSalt, responderSalt = macSalt.toByteArray())
-        )
+    private fun linkFor(tag: String?): HubLink? =
+        if (tag != null) links[tag] else links.values.singleOrNull()
+
+    /** "Connected to MacBook, DESKTOP-1", for the status line. */
+    private fun connectionSummary(): String {
+        if (links.isEmpty()) return "Not paired — scan the QR code on your computer"
+        val ready = links.values.filter { it.ready }.map { it.name }
+        return if (ready.isNotEmpty()) "Connected to ${ready.joinToString()}"
+        else "Searching for ${links.values.joinToString { it.name }}…"
     }
 
+    /** Send to every computer whose session is up. */
+    private fun broadcast(envelope: Envelope) = links.values.forEach { if (it.ready) it.send(envelope) }
+
     /**
-     * Push the phone's current clipboard to the Mac.
+     * Push the phone's current clipboard to every connected computer.
      *
      * Called by [MainActivity] when it comes to the foreground: since Android 10
      * a background app gets `null` from `getPrimaryClip()`, so the change
@@ -341,14 +287,14 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
 
     private fun startBatteryMonitoring() {
         batteryMonitor.start { status ->
-            bridgSocket.send(Envelope.newBuilder().setDeviceStatus(status).build())
+            broadcast(Envelope.newBuilder().setDeviceStatus(status).build())
         }
     }
 
     private fun startClipboardMonitoring() {
         clipboardManager.startMonitoring(object : BridgClipboardManager.ClipboardForwarder {
             override fun onClipboardChanged(update: ClipboardUpdate) {
-                bridgSocket.send(Envelope.newBuilder().setClipboard(update).build())
+                broadcast(Envelope.newBuilder().setClipboard(update).build())
             }
         })
     }
@@ -373,11 +319,11 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
         BridgNotificationListenerService.instance?.setEventForwarder(
             object : BridgNotificationListenerService.NotificationEventForwarder {
                 override fun onNotificationPosted(event: NotificationEvent) {
-                    bridgSocket.send(Envelope.newBuilder().setNotification(event).build())
+                    broadcast(Envelope.newBuilder().setNotification(event).build())
                 }
 
                 override fun onNotificationDismissed(event: NotificationEvent) {
-                    bridgSocket.send(
+                    broadcast(
                         Envelope.newBuilder().setNotifDismiss(
                             NotificationDismiss.newBuilder()
                                 .setId(event.id)
@@ -392,7 +338,7 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
         // the first moment they can be read.
         mediaControl.stop()
         mediaControl.start { state ->
-            bridgSocket.send(Envelope.newBuilder().setMediaState(state).build())
+            broadcast(Envelope.newBuilder().setMediaState(state).build())
         }
 
         // A call notification posts once. If it landed while the link was down,
@@ -466,7 +412,7 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
             } == true
         if (ringing) {
             if (haveCallNotification) return
-            bridgSocket.send(
+            broadcast(
                 Envelope.newBuilder().setNotification(
                     NotificationEvent.newBuilder()
                         .setId(CALL_EVENT_ID)
@@ -479,7 +425,7 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
                 ).build()
             )
         } else {
-            bridgSocket.send(
+            broadcast(
                 Envelope.newBuilder().setNotifDismiss(
                     NotificationDismiss.newBuilder().setId(CALL_EVENT_ID).setPackageName("com.android.phone")
                 ).build()
@@ -528,7 +474,7 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
         try {
             screenCapture.startCapture(projection, object : ScreenCapture.FrameCallback {
                 override fun onConfigFrame(spsPps: ByteArray) {
-                    bridgSocket.send(
+                    broadcast(
                         Envelope.newBuilder().setVideoStreamStart(
                             VideoStreamStart.newBuilder()
                                 .setStreamType(VideoStreamStart.StreamType.SCREEN)
@@ -553,19 +499,24 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
                             .build()
                     ).build()
 
-                    // Frames the socket had to drop leave the Mac's decoder
+                    // Frames a socket had to drop leave that computer's decoder
                     // referencing pictures it never got; without this it stays
                     // broken until the next scheduled I-frame, two seconds out.
-                    if (bridgSocket.sendVideoFrame(envelope, isKeyframe)) {
-                        screenCapture.requestKeyframe()
+                    //
+                    // ponytail: the mirror goes to every connected computer,
+                    // N× the bandwidth. Add a target picker if two at once hurts.
+                    var needKeyframe = false
+                    for (link in links.values) {
+                        if (link.ready && link.socket.sendVideoFrame(envelope, isKeyframe)) needKeyframe = true
                     }
+                    if (needKeyframe) screenCapture.requestKeyframe()
                 }
             })
 
             // Same projection, so the Mac hears what it sees. Best-effort:
             // a device or app that refuses playback capture just stays silent.
             audioCapture.start(projection) { pcm, sampleRate, channels ->
-                bridgSocket.send(
+                broadcast(
                     Envelope.newBuilder().setAudioFrame(
                         AudioFrame.newBuilder()
                             .setPcm(com.google.protobuf.ByteString.copyFrom(pcm))
@@ -591,27 +542,21 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
      * the app's own storage can be opened as a raw `File` under scoped storage,
      * so [sendFile] could never have served the share path.
      */
-    private fun queueOrSend(uri: android.net.Uri) {
-        if (sessionReady) return sendUri(uri)
-        pendingShares.add(uri)
-        updateStatus("${pendingShares.size} file(s) waiting for your Mac…")
+    private fun queueOrSend(uri: android.net.Uri, deviceId: String?) {
+        // The share screen asks which computer when there is more than one;
+        // without a choice, take one that is up now.
+        val link = links.values.firstOrNull { it.deviceId != null && it.deviceId == deviceId }
+            ?: links.values.firstOrNull { it.ready } ?: links.values.firstOrNull()
+        if (link == null) {
+            updateStatus("Pair a computer first")
+            return
+        }
+        if (link.ready) return sendUri(link, uri)
+        link.pendingShares.add(uri)
+        updateStatus("${link.pendingShares.size} file(s) waiting for ${link.name}…")
     }
 
-    /**
-     * The session key is set: sealed frames can flow. Sends anything shared
-     * while we were still connecting. Off the receive thread, because the
-     * file sender's blocking enqueue must not stall the socket reader.
-     *
-     * ponytail: the share's read grant can lapse if the user leaves the share
-     * target long before the Mac shows up; copy to cacheDir if that bites.
-     */
-    private fun onSessionReady() {
-        sessionReady = true
-        val queued = synchronized(pendingShares) { pendingShares.toList().also { pendingShares.clear() } }
-        if (queued.isNotEmpty()) scope.launch { queued.forEach { sendUri(it) } }
-    }
-
-    private fun sendUri(uri: android.net.Uri) {
+    private fun sendUri(link: HubLink, uri: android.net.Uri) {
         var name = uri.lastPathSegment?.substringAfterLast('/') ?: "file"
         var size = 0L
 
@@ -645,14 +590,17 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
             return
         }
 
-        updateStatus("Sending $name…")
+        updateStatus("Sending $name to ${link.name}…")
+        // Blocking enqueue so a fast disk read can't outrun the socket and get
+        // chunks dropped — that was the "file transfer works sometimes" bug.
         fileTransferManager.startSend(
             stream, name, size,
             contentResolver.getType(uri) ?: "application/octet-stream"
-        )
+        ) { link.socket.sendBlocking(it) }
     }
 
     private fun sendFile(filePath: String) {
+        val link = links.values.firstOrNull { it.ready } ?: return
         val file = java.io.File(filePath)
         // A raw File path outside the app's own storage can pass exists() (a
         // stat()) and still fail to open under scoped storage — this used to
@@ -665,7 +613,9 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
             Log.e(TAG, "Cannot read $filePath: ${e.message}")
             return
         }
-        fileTransferManager.startSend(stream, file.name, file.length(), "application/octet-stream")
+        fileTransferManager.startSend(stream, file.name, file.length(), "application/octet-stream") {
+            link.socket.sendBlocking(it)
+        }
     }
 
     /**
@@ -717,48 +667,17 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
         }
     }
 
-    private fun handleIncomingEnvelope(envelope: Envelope) {
+    /** Everything after the handshake, from [from]. Replies go back on the same link. */
+    private fun handleIncomingEnvelope(from: HubLink, envelope: Envelope) {
         when (envelope.payloadCase) {
-            Envelope.PayloadCase.PAIR_RESPONSE -> {
-                val pairing = pendingPairing ?: return
-                val peerKey = pairingManager.verifyPairResponse(envelope.pairResponse, pairing.publicKey)
-                if (peerKey == null) {
-                    updateStatus("Pairing failed")
-                    return
-                }
-                val sessionKey = sessionKeyFor(peerKey, envelope.pairResponse.sessionSalt) ?: return
-                pairingManager.completePairing(peerKey, envelope.pairResponse.deviceName)
-                pendingPairing = null
-                bridgSocket.setEncryptionKey(sessionKey)
-                onSessionReady()
-                batteryMonitor.resend()
-                // The listener may have bound after the service started; this
-                // also re-sends ringing calls and media state, now sealed.
-                startNotificationForwarding()
-                updateStatus("Paired with ${envelope.pairResponse.deviceName}")
-            }
-
-            Envelope.PayloadCase.PAIR_RESUME_ACK -> {
-                // The ack is the Mac's last plaintext frame; it carries the salt
-                // half we need before either side can seal anything.
-                if (!envelope.pairResumeAck.accepted) {
-                    updateStatus("Mac rejected the connection — re-pair")
-                    return
-                }
-                val peerKey = keyManager.getPairedPeerPublicKey() ?: return
-                val sessionKey = sessionKeyFor(peerKey, envelope.pairResumeAck.sessionSalt) ?: return
-                bridgSocket.setEncryptionKey(sessionKey)
-                onSessionReady()
-                batteryMonitor.resend()
-                // The listener may have bound after the service started; this
-                // also re-sends ringing calls and media state, now sealed.
-                startNotificationForwarding()
-                updateStatus("Connected to Mac")
-            }
-
             Envelope.PayloadCase.REMOTE_ACTION -> remoteActions.handle(envelope.remoteAction)
 
-            Envelope.PayloadCase.CLIPBOARD -> clipboardManager.handleRemoteClipboard(envelope.clipboard)
+            Envelope.PayloadCase.CLIPBOARD -> {
+                clipboardManager.handleRemoteClipboard(envelope.clipboard)
+                // Pass it on: copy on the Mac, paste on the PC. origin_id rides
+                // along unchanged, so the computer it came from ignores it.
+                links.values.forEach { if (it !== from && it.ready) it.send(envelope) }
+            }
 
             Envelope.PayloadCase.NOTIF_ACTION -> {
                 BridgNotificationListenerService.instance?.handleReplyAction(
@@ -776,7 +695,7 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
                     fileTransferManager.handleTransferStart(envelope.fileStart, outputStream)
                 } catch (e: Exception) {
                     Log.e(TAG, "Cannot receive ${envelope.fileStart.filename}: ${e.message}")
-                    bridgSocket.send(
+                    from.send(
                         Envelope.newBuilder().setFileAck(
                             FileTransferAck.newBuilder()
                                 .setTransferId(envelope.fileStart.transferId)
@@ -788,7 +707,7 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
             }
 
             Envelope.PayloadCase.FILE_CHUNK -> {
-                bridgSocket.send(
+                from.send(
                     Envelope.newBuilder()
                         .setFileAck(fileTransferManager.handleFileChunk(envelope.fileChunk))
                         .build()
@@ -811,7 +730,7 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
             Envelope.PayloadCase.MEDIA_COMMAND -> mediaControl.handleCommand(envelope.mediaCommand.action)
 
             Envelope.PayloadCase.PING -> {
-                bridgSocket.send(
+                from.send(
                     Envelope.newBuilder().setPong(
                         Pong.newBuilder()
                             .setTimestamp(System.currentTimeMillis())
@@ -855,12 +774,12 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
         return Notification.Builder(this, BridgApplication.CHANNEL_SERVICE)
             .setContentTitle("Bridg")
             .setContentText(contentText)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_bridg)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .addAction(
                 Notification.Action.Builder(
-                    android.graphics.drawable.Icon.createWithResource(this, R.mipmap.ic_launcher),
+                    android.graphics.drawable.Icon.createWithResource(this, R.drawable.ic_stat_bridg),
                     "Send clipboard",
                     clipboardIntent
                 ).build()
@@ -868,63 +787,220 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
             .build()
     }
 
-    // ─── ConnectionListener ────────────────────────────────────────────────────
-
-    override fun onConnected() {
-        connected = true
-        updateStatus("Connected — handshaking…")
-        startHandshake()
-        // Notification forwarding (and its catch-up sends) starts once the
-        // session key is set — see PAIR_RESPONSE / PAIR_RESUME_ACK. Anything sent
-        // before that is dropped by BridgSocket rather than leaked in plaintext.
-    }
-
-    override fun onDisconnected() {
-        connected = false
-        sessionReady = false
-        sessionSalt = null
-        bridgSocket.clearEncryption()
-        updateStatus("Disconnected — searching…")
-    }
-
-    override fun onConnectionFailed(error: Exception) {
-        connected = false
-        Log.e(TAG, "Connection failed: ${error.message}")
-        updateStatus("Connection failed — retrying…")
-        scheduleRetry()
-    }
-
     /**
-     * Redial the known host after a failed connect.
-     *
-     * The status always said "retrying…" but nothing retried. A refused dial —
-     * the Mac app quitting or relaunching, the Mac waking up — was the end of it,
-     * and Bonjour does not report a service it has already found, so the phone
-     * stayed disconnected until the app was restarted. Known-host and discovery
-     * dials often fail together; cancelling first keeps it to one pending retry.
-     *
-     * ponytail: fixed delay, no backoff. With the Mac off this network that is a
-     * dial every ~15 s (10 s connect timeout + delay); add backoff if it shows up
-     * in battery use.
+     * The connection to one computer. Each has its own socket, salt, session
+     * key and retry timer, so one going away never touches the others.
      */
-    private fun scheduleRetry() {
-        retryJob?.cancel()
-        retryJob = scope.launch {
-            delay(RETRY_DELAY_MS)
-            if (isServiceRunning && !connected) connectToKnownHost()
+    private inner class HubLink(
+        val peerKey: ByteArray,
+        @Volatile var name: String,
+        /** Null until pairing completes. */
+        @Volatile var deviceId: String?,
+        /** Set while pairing from a fresh QR scan; null for a resume. */
+        @Volatile var pairing: PairingManager.QRData? = null,
+    ) : BridgSocket.ConnectionListener {
+        val tag = KeyManager.hubTag(peerKey)
+        val socket = BridgSocket().also {
+            it.setConnectionListener(this)
+            it.setReceiveListener { envelope -> onEnvelope(envelope) }
         }
-    }
 
-    override fun onConnectionLost(error: Exception) {
-        connected = false
-        sessionReady = false
-        sessionSalt = null
-        bridgSocket.clearEncryption()
-        Log.e(TAG, "Connection lost: ${error.message}")
-        updateStatus("Reconnecting…")
-        // Rebuild the browse so a new resolve fires and we dial back in.
-        serviceDiscovery.stopDiscovery()
-        startDiscovery()
+        @Volatile var connected = false
+
+        /** True once the session key is set; before that BridgSocket drops everything. */
+        @Volatile var ready = false
+
+        /**
+         * Our fresh salt for the connection currently handshaking. The
+         * computer's half arrives in its reply, and the session key needs both
+         * — see [com.bridg.pairing.SessionKdf.deriveSessionKey].
+         */
+        @Volatile private var sessionSalt: ByteArray? = null
+
+        /** The one pending redial after a failed connect; see [scheduleRetry]. */
+        private var retryJob: Job? = null
+
+        /** Files shared to this computer before its session was up; flushed by [onReady]. */
+        val pendingShares: MutableList<android.net.Uri> =
+            java.util.Collections.synchronizedList(mutableListOf())
+
+        fun send(envelope: Envelope) = socket.send(envelope)
+
+        /**
+         * Dial [host], by default the last address we saw this computer at.
+         *
+         * mDNS is link-local multicast: on a segmented network (campus, office,
+         * guest Wi-Fi) the phone and computer can route to each other fine while
+         * discovery finds nothing at all. The QR code carries the address for
+         * exactly this reason, and we keep using it on later reconnects.
+         */
+        fun dial(host: String? = pairing?.host?.ifEmpty { null } ?: deviceId?.let { keyManager.getHost(it) },
+                 port: Int = DEFAULT_PORT) {
+            if (connected || host == null) return
+            scope.launch {
+                if (!connected) {
+                    Log.i(TAG, "Dialling $name at $host:$port")
+                    socket.connect(host, port)
+                }
+            }
+        }
+
+        fun close() {
+            retryJob?.cancel()
+            socket.disconnect()
+        }
+
+        /**
+         * Announce ourselves as soon as the socket is up: a fresh pairing if the
+         * user just scanned a QR, otherwise a resume against the key we hold.
+         * Encryption cannot start until the computer sends its salt half back,
+         * so this frame goes out in the clear.
+         */
+        private fun startHandshake() {
+            val salt = SessionKdf.randomSalt()
+            sessionSalt = salt
+            val qr = pairing
+            send(
+                if (qr != null) Envelope.newBuilder().setPairRequest(pairingManager.createPairRequest(qr.token, salt)).build()
+                else Envelope.newBuilder().setPairResume(pairingManager.createPairResume(salt)).build()
+            )
+        }
+
+        private fun onEnvelope(envelope: Envelope) {
+            when (envelope.payloadCase) {
+                Envelope.PayloadCase.PAIR_RESPONSE -> {
+                    val qr = pairing ?: return
+                    val key = pairingManager.verifyPairResponse(envelope.pairResponse, qr.publicKey)
+                    if (key == null) {
+                        // A computer we were already paired with falls back to
+                        // resuming; a new one is forgotten, or it redials forever
+                        // and the status line keeps "searching" for it.
+                        pairing = null
+                        if (deviceId == null) {
+                            if (links.remove(tag, this)) close()
+                        } else {
+                            socket.disconnect()
+                            scheduleRetry()
+                        }
+                        updateStatus("Pairing with $name failed")
+                        return
+                    }
+                    val sessionKey = sessionKeyFor(envelope.pairResponse.sessionSalt) ?: return
+                    name = envelope.pairResponse.deviceName.ifEmpty { name }
+                    val id = pairingManager.completePairing(key, name)
+                    deviceId = id
+                    qr.host.ifEmpty { null }?.let { keyManager.setHost(id, it) }
+                    pairing = null
+                    onReady(sessionKey)
+                }
+
+                Envelope.PayloadCase.PAIR_RESUME_ACK -> {
+                    // The ack is the computer's last plaintext frame; it carries
+                    // the salt half we need before either side can seal anything.
+                    if (!envelope.pairResumeAck.accepted) {
+                        updateStatus("$name rejected the connection — re-pair")
+                        return
+                    }
+                    val sessionKey = sessionKeyFor(envelope.pairResumeAck.sessionSalt) ?: return
+                    onReady(sessionKey)
+                }
+
+                else -> handleIncomingEnvelope(this, envelope)
+            }
+        }
+
+        /**
+         * Session key for this connection, from the computer's salt and ours.
+         * Null if it sent none — an old build whose key would repeat on every
+         * reconnect, which is exactly what the salts prevent.
+         */
+        private fun sessionKeyFor(theirSalt: ByteString): ByteArray? {
+            val ourSalt = sessionSalt
+            if (ourSalt == null || theirSalt.size() != SessionKdf.SALT_LENGTH) {
+                Log.e(TAG, "Handshake carried no session salt — refusing to connect")
+                updateStatus("Bridg on $name is out of date — update it")
+                socket.disconnect()
+                return null
+            }
+            sessionSalt = null
+            return keyManager.deriveSharedSecret(
+                peerKey,
+                SessionKdf.connectionInfo(initiatorSalt = ourSalt, responderSalt = theirSalt.toByteArray())
+            )
+        }
+
+        /**
+         * The session key is set: sealed frames can flow. Sends anything shared
+         * while we were still connecting — off the receive thread, because the
+         * file sender's blocking enqueue must not stall the socket reader.
+         *
+         * ponytail: the share's read grant can lapse if the user leaves the share
+         * target long before the computer shows up; copy to cacheDir if that bites.
+         */
+        private fun onReady(sessionKey: ByteArray) {
+            socket.setEncryptionKey(sessionKey)
+            ready = true
+            updateStatus(connectionSummary())
+            val queued = synchronized(pendingShares) { pendingShares.toList().also { pendingShares.clear() } }
+            if (queued.isNotEmpty()) scope.launch { queued.forEach { sendUri(this@HubLink, it) } }
+            batteryMonitor.resend()
+            // The listener may have bound after the service started; this also
+            // re-sends ringing calls and media state, now sealed.
+            startNotificationForwarding()
+        }
+
+        private fun reset() {
+            connected = false
+            ready = false
+            sessionSalt = null
+            socket.clearEncryption()
+        }
+
+        override fun onConnected() {
+            connected = true
+            startHandshake()
+            // Notification forwarding (and its catch-up sends) starts once the
+            // session key is set — see [onReady]. Anything sent before that is
+            // dropped by BridgSocket rather than leaked in plaintext.
+        }
+
+        override fun onDisconnected() {
+            reset()
+            updateStatus(connectionSummary())
+        }
+
+        override fun onConnectionFailed(error: Exception) {
+            connected = false
+            Log.e(TAG, "Dialling $name failed: ${error.message}")
+            scheduleRetry()
+        }
+
+        override fun onConnectionLost(error: Exception) {
+            reset()
+            Log.e(TAG, "Lost $name: ${error.message}")
+            updateStatus(connectionSummary())
+            restartDiscovery()
+        }
+
+        /**
+         * Redial the known host after a failed connect.
+         *
+         * A refused dial — the computer's app quitting or relaunching, the
+         * computer waking up — was otherwise the end of it: Bonjour does not
+         * report a service it has already found. Known-host and discovery dials
+         * often fail together; cancelling first keeps it to one pending retry.
+         *
+         * ponytail: fixed delay, no backoff. With a computer off this network
+         * that is a dial every ~15 s (10 s connect timeout + delay) per computer;
+         * add backoff if it shows up in battery use.
+         */
+        private fun scheduleRetry() {
+            retryJob?.cancel()
+            retryJob = scope.launch {
+                delay(RETRY_DELAY_MS)
+                if (isServiceRunning && !connected) dial()
+            }
+        }
     }
 
     private fun updateStatus(text: String) {
@@ -964,5 +1040,7 @@ class BridgService : Service(), BridgSocket.ConnectionListener {
         const val EXTRA_PEER_HOST = "peer_host"
         const val DEFAULT_PORT = 18920
         const val EXTRA_PAIRING_TOKEN = "pairing_token"
+        /** Paired device id of the computer a shared file goes to. */
+        const val EXTRA_HUB_ID = "hub_id"
     }
 }

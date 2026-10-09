@@ -243,6 +243,42 @@ class BridgSocketTest {
     }
 
     /**
+     * The phone dials anything advertising _bridg._tcp. A rogue host on the
+     * Wi-Fi could then send plaintext InputEvents (taps via the accessibility
+     * service), CallControl or OPEN_URL before any key existed, and the phone
+     * acted on them. Pre-handshake, only the Mac's handshake reply may land.
+     */
+    @Test
+    fun plaintextCommandBeforeHandshakeDropsTheLink() {
+        ServerSocket(0).use { server ->
+            val delivered = AtomicInteger()
+            val lost = CountDownLatch(1)
+            val socket = BridgSocket()
+            socket.setReceiveListener { delivered.incrementAndGet() }
+            socket.setConnectionListener(object : BridgSocket.ConnectionListener {
+                override fun onConnected() {}
+                override fun onDisconnected() {}
+                override fun onConnectionFailed(error: Exception) {}
+                override fun onConnectionLost(error: Exception) = lost.countDown()
+            })
+            runBlocking { socket.connect("127.0.0.1", server.localPort) }
+            server.accept().use { rogue ->
+                val out = java.io.DataOutputStream(rogue.getOutputStream())
+                FrameCodec.writeFrame(
+                    out,
+                    Envelope.newBuilder()
+                        .setInputEvent(com.bridg.proto.InputEvent.newBuilder().setType(com.bridg.proto.InputEvent.EventType.TAP))
+                        .build().toByteArray()
+                )
+                out.flush()
+                assertTrue(lost.await(2, TimeUnit.SECONDS))
+            }
+            assertEquals(0, delivered.get())
+            assertFalse(socket.isConnected())
+        }
+    }
+
+    /**
      * When the Mac quits or relaunches it closes the socket cleanly, and the
      * read loop treated end-of-stream as a quiet exit. Nothing reported the
      * loss, so the phone sat on the dead socket, still "connected", and never
@@ -279,5 +315,18 @@ class UpdateVersionTest {
         assertFalse(newer("0.3.2", "0.3.2"))
         assertFalse(newer("0.3", "0.3.0"))
         assertFalse(newer("0.3.1", "0.3.2"))
+    }
+}
+
+/**
+ * The Mac advertises this in its Bonjour TXT `id`, and the phone dials only
+ * services whose id matches a paired computer. Same vector as
+ * testHubTagMatchesTheAndroidVector on the Mac.
+ */
+class HubTagTest {
+    @Test
+    fun matchesTheMacVector() {
+        val key = ByteArray(32) { it.toByte() }
+        assertEquals("630dcd2966c43366", com.bridg.pairing.KeyManager.hubTag(key))
     }
 }

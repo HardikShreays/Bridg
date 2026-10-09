@@ -6,7 +6,7 @@ import android.net.nsd.NsdServiceInfo
 import android.util.Log
 
 /**
- * NSD discovery for finding the Mac on the local network.
+ * NSD discovery for finding paired computers (Mac, Windows, Linux) on the LAN.
  *
  * The phone only browses. The Mac is the server: it advertises and listens.
  * Both sides advertising *and* browsing meant each one discovered itself.
@@ -82,10 +82,13 @@ class ServiceDiscovery(context: Context) {
         discoveryListener = null
     }
 
-    /** Resolve a discovered service to a host and port. Resolves are serialized. */
+    /**
+     * Resolve a discovered service to a host, port and the hub's `id` TXT
+     * entry (null from Mac builds that predate it). Resolves are serialized.
+     */
     fun resolveService(
         serviceInfo: NsdServiceInfo,
-        onResolved: (host: java.net.InetAddress, port: Int) -> Unit,
+        onResolved: (host: java.net.InetAddress, port: Int, hubTag: String?) -> Unit,
         onFailed: (String) -> Unit
     ) {
         pendingResolves.addLast(PendingResolve(serviceInfo, onResolved, onFailed))
@@ -109,7 +112,8 @@ class ServiceDiscovery(context: Context) {
                 resolveInFlight = false
                 val host = serviceInfo.host
                 val port = serviceInfo.port
-                if (host != null && port > 0) next.onResolved(host, port)
+                val tag = serviceInfo.attributes["id"]?.let { String(it, Charsets.US_ASCII) }
+                if (host != null && port > 0) next.onResolved(host, port, tag)
                 else next.onFailed("Invalid resolved service info")
                 pumpResolves()
             }
@@ -118,7 +122,7 @@ class ServiceDiscovery(context: Context) {
 
     private data class PendingResolve(
         val info: NsdServiceInfo,
-        val onResolved: (java.net.InetAddress, Int) -> Unit,
+        val onResolved: (java.net.InetAddress, Int, String?) -> Unit,
         val onFailed: (String) -> Unit
     )
 

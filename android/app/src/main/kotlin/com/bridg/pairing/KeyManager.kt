@@ -29,6 +29,8 @@ class KeyManager(context: Context) {
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
     )
 
+    init { migrateLegacyHost() }
+
     /**
      * Generate a new X25519 keypair and persist it.
      * Returns the public key bytes (32 bytes).
@@ -79,18 +81,24 @@ class KeyManager(context: Context) {
         return SessionKdf.deriveSessionKey(sharedSecret, info)
     }
 
-    fun savePairedDevice(deviceId: String, publicKey: ByteArray, name: String) {
-        val editor = prefs.edit()
-        val ids = getPairedDeviceIds().toMutableSet()
-        ids.add(deviceId)
-
-        editor.putString("$DEVICE_PREFIX$deviceId$SUFFIX_NAME", name)
-        editor.putString("$DEVICE_PREFIX$deviceId$SUFFIX_KEY", Base64.getEncoder().encodeToString(publicKey))
-        // The old code wrote a count but never the "device_index_N" keys it read
-        // back, so getPairedDevices() always returned empty and the phone never
-        // knew it was paired.
-        editor.putStringSet(DEVICE_IDS, ids)
-        editor.apply()
+    /**
+     * Store a paired hub and return its id. Re-pairing the same hub (same key)
+     * keeps its id rather than adding a duplicate entry that would dial the
+     * same computer twice.
+     */
+    fun savePairedDevice(publicKey: ByteArray, name: String): String {
+        val encoded = Base64.getEncoder().encodeToString(publicKey)
+        val deviceId = getPairedDevices().entries.firstOrNull { it.value.publicKey == encoded }?.key
+            ?: java.util.UUID.randomUUID().toString()
+        prefs.edit()
+            .putString("$DEVICE_PREFIX$deviceId$SUFFIX_NAME", name)
+            .putString("$DEVICE_PREFIX$deviceId$SUFFIX_KEY", encoded)
+            // The old code wrote a count but never the "device_index_N" keys it read
+            // back, so getPairedDevices() always returned empty and the phone never
+            // knew it was paired.
+            .putStringSet(DEVICE_IDS, getPairedDeviceIds() + deviceId)
+            .apply()
+        return deviceId
     }
 
     private fun getPairedDeviceIds(): Set<String> = prefs.getStringSet(DEVICE_IDS, emptySet()) ?: emptySet()
@@ -105,28 +113,35 @@ class KeyManager(context: Context) {
         return devices
     }
 
-    /** Public key of the Mac we are paired with, or null. */
-    fun getPairedPeerPublicKey(): ByteArray? =
-        getPairedDevices().values.firstOrNull()?.let { Base64.getDecoder().decode(it.publicKey) }
-
     fun removePairedDevice(deviceId: String) {
         val ids = getPairedDeviceIds().toMutableSet()
         ids.remove(deviceId)
         prefs.edit()
             .remove("$DEVICE_PREFIX$deviceId$SUFFIX_NAME")
             .remove("$DEVICE_PREFIX$deviceId$SUFFIX_KEY")
+            .remove("$DEVICE_PREFIX$deviceId$SUFFIX_HOST")
             .putStringSet(DEVICE_IDS, ids)
             .apply()
     }
 
     /**
-     * Last known address of the Mac. Discovery cannot find it on networks where
+     * Last known address of a hub. Discovery cannot find it on networks where
      * mDNS does not cross subnets, so we fall back to dialling it directly.
      */
-    fun getLastHost(): String? = prefs.getString(KEY_LAST_HOST, null)?.ifEmpty { null }
+    fun getHost(deviceId: String): String? =
+        prefs.getString("$DEVICE_PREFIX$deviceId$SUFFIX_HOST", null)?.ifEmpty { null }
 
-    fun setLastHost(host: String) {
-        prefs.edit().putString(KEY_LAST_HOST, host).apply()
+    fun setHost(deviceId: String, host: String) {
+        prefs.edit().putString("$DEVICE_PREFIX$deviceId$SUFFIX_HOST", host).apply()
+    }
+
+    /** Builds that knew only one hub kept a single "last_host"; it belongs to that hub. */
+    private fun migrateLegacyHost() {
+        val legacy = prefs.getString(KEY_LAST_HOST, null) ?: return
+        val ids = getPairedDeviceIds()
+        val edit = prefs.edit().remove(KEY_LAST_HOST)
+        if (ids.size == 1 && legacy.isNotEmpty()) edit.putString("$DEVICE_PREFIX${ids.first()}$SUFFIX_HOST", legacy)
+        edit.apply()
     }
 
     fun getDeviceName(): String =
@@ -147,6 +162,16 @@ class KeyManager(context: Context) {
         private const val DEVICE_PREFIX = "device_"
         private const val SUFFIX_NAME = "_name"
         private const val SUFFIX_KEY = "_key"
+        private const val SUFFIX_HOST = "_host"
         private const val DEVICE_IDS = "device_ids"
+
+        /**
+         * Short public id of a hub: hex of the first 8 bytes of SHA-256(pubkey).
+         * Hubs advertise it in their Bonjour TXT record as `id`, so the phone
+         * dials only computers it is paired with and knows which one it reached.
+         * Must match ConnectionManager.hubTag on the Mac.
+         */
+        fun hubTag(publicKey: ByteArray): String =
+            MessageDigest.getInstance("SHA-256").digest(publicKey).take(8).joinToString("") { "%02x".format(it) }
     }
 }

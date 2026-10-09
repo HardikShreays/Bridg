@@ -315,4 +315,35 @@ final class BridgTests: XCTestCase {
         XCTAssertFalse(UpdateChecker.isNewer("0.3", than: "0.3.0"))
         XCTAssertFalse(UpdateChecker.isNewer("0.3.1", than: "0.3.2"))
     }
+
+    /// Anything on the LAN can open port 18920. Before the handshake, a
+    /// plaintext clipboard/notification/file frame used to reach the feature
+    /// handlers as if it came from the paired phone.
+    func testOnlyTheHandshakeIsAcceptedBeforeEncryption() {
+        var resume = BridgProtoEnvelope()
+        resume.pairResume = BridgProtoPairResume()
+        var request = BridgProtoEnvelope()
+        request.pairRequest = BridgProtoPairRequest()
+        XCTAssertTrue(ConnectionManager.allowedBeforeHandshake(resume))
+        XCTAssertTrue(ConnectionManager.allowedBeforeHandshake(request))
+
+        var clip = BridgProtoEnvelope()
+        clip.clipboard = BridgProtoClipboardUpdate()
+        var notif = BridgProtoEnvelope()
+        notif.notification = BridgProtoNotificationEvent()
+        var file = BridgProtoEnvelope()
+        file.fileStart = BridgProtoFileTransferStart()
+        var ping = BridgProtoEnvelope()
+        ping.ping = BridgProtoPing()
+        for envelope in [clip, notif, file, ping, BridgProtoEnvelope()] {
+            XCTAssertFalse(ConnectionManager.allowedBeforeHandshake(envelope))
+        }
+    }
+
+    /// The phone matches this against its own computation; the two disagreeing
+    /// means the phone never dials this Mac. Same vector as HubTagTest on Android.
+    func testHubTagMatchesTheAndroidVector() {
+        let key = Data((0..<32).map { UInt8($0) })
+        XCTAssertEqual(ConnectionManager.hubTag(publicKey: key), "630dcd2966c43366")
+    }
 }

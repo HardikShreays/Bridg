@@ -92,6 +92,13 @@ when pairing, `PairResume`/`PairResumeAck` when resuming. Both sides upgrade to
 the encrypted transport immediately after the responder's reply, which is always
 the last plaintext frame in either direction.
 
+**Receivers must drop the connection on any other plaintext frame.** Before the
+session key exists, a responder accepts only `PairRequest`/`PairResume` and an
+initiator only `PairResponse`/`PairResumeAck`. The port is open to the whole LAN
+and the phone dials anything advertising `_bridg._tcp`, so a plaintext
+`InputEvent`, `ClipboardUpdate` or `RemoteAction` is by definition from someone
+who never paired. Every client — including any new platform — must enforce this.
+
 ## Message Types
 
 All message types are defined in `proto/bridg.proto`. See that file for the canonical schema.
