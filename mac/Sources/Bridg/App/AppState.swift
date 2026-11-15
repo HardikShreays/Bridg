@@ -42,6 +42,18 @@ final class AppState: ObservableObject {
     private let notificationManager = NotificationManager()
     private let fileTransferManager = FileTransferManager()
     private let phoneDialer = PhoneDialer()
+
+    /// Where the share extension (Finder right-click → Share → Bridg) drops
+    /// items. The extension and this app must agree on the path — see
+    /// ShareExtension.swift.
+    private let shareInbox = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("Bridg", isDirectory: true)
+        .appendingPathComponent("ShareInbox", isDirectory: true)
+    /// Shared items are moved here before being sent, and deleted once the
+    /// transfer finishes: they are one-off copies, not the user's original.
+    private let shareSpool = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("Bridg", isDirectory: true)
+        .appendingPathComponent("ShareSpool", isDirectory: true)
     // Fed from the network queue alongside video, never from the main actor.
     nonisolated(unsafe) private let audioPlayer = AudioPlayer()
     // Driven from ConnectionManager's network queue, never from the main actor.
@@ -71,6 +83,61 @@ final class AppState: ObservableObject {
         // Nothing paired yet means the only useful thing this app can show is
         // the QR code, so show it without making the user find a button first.
         if !hasPairedDevice { startPairing() }
+        wireShareInbox()
+    }
+
+    // MARK: - Share inbox
+
+    /// The share extension wakes us two ways: a distributed notification when
+    /// we are already running, and the `bridg://share-inbox` URL when we are
+    /// not (which launches us). Items may also still be waiting from a share
+    /// that arrived while no phone was connected, so re-check whenever a
+    /// phone comes online too.
+    private func wireShareInbox() {
+        DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("com.bridg.share.inbox"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.processShareInbox() }
+        }
+        processShareInbox()
+    }
+
+    /// Send everything the share extension left in the inbox.
+    private func processShareInbox() {
+        // With no connected phone the transfer would fail; leaving the items
+        // in the inbox means they go out as soon as a phone connects (the
+        // onPhoneConnected hook re-runs this).
+        guard selectedPhone?.connected == true else { return }
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(at: shareInbox, includingPropertiesForKeys: nil),
+              !items.isEmpty else { return }
+        try? fm.createDirectory(at: shareSpool, withIntermediateDirectories: true)
+
+        for url in items {
+            // Move before sending: the transfer streams the file over time,
+            // and the inbox must not half-own a file mid-flight (or resend it
+            // on the next trigger). If it cannot be moved, report rather
+            // than retry forever.
+            let dest = shareSpool.appendingPathComponent(url.lastPathComponent)
+            try? fm.removeItem(at: dest)
+            do {
+                try fm.moveItem(at: url, to: dest)
+            } catch {
+                try? fm.removeItem(at: url)
+                lastTransferError = "Could not pick up shared item: \(error.localizedDescription)"
+                continue
+            }
+            sendFiles([dest])
+        }
+    }
+
+    /// Spooled shares are copies; delete them once sent (or failed). Used by
+    /// the transfer callbacks so completed items do not pile up.
+    private func removeIfSpooled(_ url: URL) {
+        guard url.path.hasPrefix(shareSpool.path + "/") else { return }
+        try? FileManager.default.removeItem(at: url)
     }
 
     // MARK: - Pairing
@@ -158,11 +225,29 @@ final class AppState: ObservableObject {
 
     /// Files go to the selected phone.
     func sendFiles(_ urls: [URL]) {
-        guard let phone = selectedPhone, phone.connected else { return }
+        guard let phone = selectedPhone, phone.connected else {
+            // Silent drops (menu bar, drop target, share inbox) made it look
+            // like sending was broken; say why instead.
+            lastTransferError = "No phone connected — connect a phone, then try again."
+            return
+        }
         transferLock.lock()
         fileTarget = phone.id
         transferLock.unlock()
         fileTransferManager.handleDroppedFiles(urls)
+    }
+
+    /// Dropped plain text (not a file): wrap it in a .txt and send that.
+    func sendTextToPhone(_ text: String) {
+        guard let phone = selectedPhone, phone.connected else {
+            lastTransferError = "No phone connected — connect a phone, then try again."
+            return
+        }
+        try? FileManager.default.createDirectory(at: shareSpool, withIntermediateDirectories: true)
+        let stamp = DateFormatter.sharedShort.string(from: Date())
+        let url = shareSpool.appendingPathComponent("Shared Text \(stamp).txt")
+        try? text.write(to: url, atomically: true, encoding: .utf8)
+        sendFiles([url])
     }
 
     /// Coordinates are normalized 0...1; the phone's accessibility service
@@ -394,6 +479,8 @@ final class AppState: ObservableObject {
                 hello.deviceInfo = Self.selfInfo
                 self.connectionManager.send(hello, to: device.id)
                 self.sharePeers()
+                // A share may have landed while the phone was offline.
+                self.processShareInbox()
             }
         }
 
@@ -507,12 +594,13 @@ final class AppState: ObservableObject {
             guard let target else { return sent?(false) ?? () }
             self.connectionManager.send(envelope, to: target, sent: sent)
         }
-        fileTransferManager.onTransferStarted = { [weak self] id, filename, size, isOutgoing in
+        fileTransferManager.onTransferStarted = { [weak self] id, filename, size, isOutgoing, url in
             Task { @MainActor in
                 self?.activeTransfers.append(
                     TransferInfo(
                         id: id, filename: filename, totalSize: size, bytesTransferred: 0,
-                        direction: isOutgoing ? .outgoing : .incoming
+                        direction: isOutgoing ? .outgoing : .incoming,
+                        sourceURL: url
                     )
                 )
             }
@@ -523,13 +611,21 @@ final class AppState: ObservableObject {
                 self?.activeTransfers[index].bytesTransferred = sent
             }
         }
-        fileTransferManager.onTransferCompleted = { [weak self] id, _ in
-            Task { @MainActor in self?.activeTransfers.removeAll { $0.id == id } }
+        fileTransferManager.onTransferCompleted = { [weak self] id, url in
+            Task { @MainActor in
+                self?.activeTransfers.removeAll { $0.id == id }
+                self?.removeIfSpooled(url)
+            }
         }
         // Errors used to only print to the console — a failed transfer just
         // vanished from the list with nothing to tell the user why.
         fileTransferManager.onTransferError = { [weak self] id, message in
             Task { @MainActor in
+                // Spooled shares are one-off copies; a failed one is not
+                // going to be sent, so it should not pile up on disk.
+                if let source = self?.activeTransfers.first(where: { $0.id == id })?.sourceURL {
+                    self?.removeIfSpooled(source)
+                }
                 self?.activeTransfers.removeAll { $0.id == id }
                 self?.lastTransferError = message
                 print("Transfer \(id) failed: \(message)")
@@ -725,12 +821,24 @@ struct MediaItem: Equatable {
     let isPlaying: Bool
 }
 
+extension DateFormatter {
+    /// File-safe timestamp for generated names ("Shared Text 2026-01-02 15-04-05.txt").
+    static let sharedShort: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH-mm-ss"
+        return formatter
+    }()
+}
+
 struct TransferInfo: Identifiable {
     let id: String
     let filename: String
     let totalSize: Int64
     var bytesTransferred: Int64
     let direction: Direction
+    /// Where the file lives on disk while the transfer runs; spooled shares
+    /// are deleted from there on completion or failure.
+    var sourceURL: URL?
 
     enum Direction: Equatable { case incoming, outgoing }
 

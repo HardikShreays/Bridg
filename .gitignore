@@ -40,3 +40,6 @@ Thumbs.db
 .vscode/
 .idea/
 *.iml
+
+# Local-only video artifacts from /brag
+brag-output*/

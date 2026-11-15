@@ -13,6 +13,11 @@ let package = Package(
         .executable(
             name: "Bridg",
             targets: ["Bridg"]
+        ),
+        // Built so make_app.sh can embed it as the share extension's binary.
+        .executable(
+            name: "BridgShareExtension",
+            targets: ["BridgShareExtension"]
         )
     ],
 
@@ -47,6 +52,14 @@ let package = Package(
             ],
 
             path: "Sources/Bridg"
+        ),
+
+        // The share extension (Finder right-click → Share → Bridg) is a
+        // separate binary: macOS launches .appex processes directly and they
+        // must not drag the whole app's dependencies along.
+        .executableTarget(
+            name: "BridgShareExtension",
+            path: "Sources/BridgShare"
         ),
 
         .testTarget(

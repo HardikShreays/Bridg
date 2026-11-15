@@ -44,6 +44,31 @@ open mac/build/Bridg.app
 Bridg is a **menu bar app** — it has no Dock icon. Look for the phone-with-waves
 icon in the top-right of your screen.
 
+### Sharing from Finder (right-click → Share → Bridg)
+
+`make_app.sh` embeds a **Share extension** (`BridgShare.appex`), which makes
+Bridg appear in Finder's right-click **Share** submenu and in other apps'
+share sheets. Shared items are copied to
+`~/Library/Application Support/Bridg/ShareInbox` and sent to the selected
+phone — if no phone is connected when you share, they wait there and go out
+when one connects.
+
+Notes:
+
+- The extension is registered the first time the built app is placed where the
+  system scans (e.g. `/Applications`). If it does not show up in the Share menu
+  after a reinstall, run `pluginkit -a /Applications/Bridg.app` or log out and
+  back in.
+- PlugInKit loads extensions only from **sandboxed** appexes signed with a real
+  identity — `make_app.sh` signs the appex with App Sandbox entitlements and a
+  temporary home-path exception for the shared inbox. An ad-hoc build works for
+  everything else but will not appear in the Share menu.
+
+### Drag and drop
+
+Drag files onto the Bridg window to send them to the selected phone. Dropping
+a web link opens it on the phone; dropping plain text sends it as a .txt file.
+
 macOS will ask for two permissions. Both are required:
 
 - **Local Network** — without it the phone can never find the Mac.
@@ -113,6 +138,8 @@ The app prompts you for this on launch; "Open Settings" takes you there.
 | Pairing over QR, encrypted link, auto-reconnect | Working |
 | Phone notifications on the Mac, including replies | Working |
 | File transfer, both directions | Working |
+| Drag-and-drop onto the Mac window | Working |
+| Finder right-click → Share → Bridg | Working (see §1) |
 | Clipboard: Mac → phone | Working |
 | Clipboard: phone → Mac | Limited by Android, see below |
 | Auto-reconnect after either app restarts | Working |

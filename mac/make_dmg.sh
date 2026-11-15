@@ -18,7 +18,11 @@ DMG="build/Bridg.dmg"
 
 if [[ -n "${DEVID:-}" ]]; then
     echo "signing with Developer ID: $DEVID"
-    codesign --force --deep --options runtime --timestamp --sign "$DEVID" "$APP"
+    # Re-sign the appex (with its sandbox entitlements) first, then the app —
+    # without --deep, which would strip the appex's entitlements.
+    codesign --force --options runtime --timestamp --entitlements build/BridgShare.entitlements \
+        --sign "$DEVID" "$APP/Contents/PlugIns/BridgShare.appex"
+    codesign --force --options runtime --timestamp --sign "$DEVID" "$APP"
 fi
 
 rm -f "$DMG"

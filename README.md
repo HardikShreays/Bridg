@@ -11,7 +11,7 @@ Built on proven capture approaches (inspired by scrcpy) with a custom protobuf-b
 - **Pairing**: One-time QR code pairing with X25519 key exchange, auto-reconnect
 - **Several computers, several phones**: One phone stays connected to a Mac and a Windows PC at once, and a computer takes several phones at once; notifications and clipboard reach all of them, and a copy on one device can be pasted on another
 - **Devices**: Every app shows the whole ecosystem: this device, its links, and the devices those report (platform, OS, model, app version, battery)
-- **File Transfer**: Drag-and-drop files between devices, SHA-256 verified
+- **File Transfer**: Drag files onto the app window or use Finder's right-click Share menu (Bridg appears there via a share extension); SHA-256 verified
 - **Notifications**: Phone notifications appear natively on Mac, with reply support
 - **Clipboard Sync**: Copy on one device, paste on the other
 - **Calls**: Answer or decline incoming calls from the Mac, or start one from the menu bar (dialling needs the phone paired with the Mac in System Settings → Bluetooth). The conversation itself stays on the phone (or earbuds paired to it): Android blocks apps from carrying call audio, and macOS refuses to open Bluetooth call audio as a hands-free device — tested in [docs/HANDSFREE_PLAN.md](docs/HANDSFREE_PLAN.md)

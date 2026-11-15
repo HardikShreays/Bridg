@@ -14,7 +14,7 @@ class FileTransferManager {
     private let transfersLock = NSLock()
 
     /// id, filename, size, isOutgoing (true = we are sending it to the phone).
-    var onTransferStarted: ((String, String, Int64, Bool) -> Void)?
+    var onTransferStarted: ((String, String, Int64, Bool, URL) -> Void)?
     var onTransferProgress: ((String, Int64, Int64) -> Void)?
     var onTransferCompleted: ((String, URL) -> Void)?
     var onTransferError: ((String, String) -> Void)?
@@ -59,7 +59,7 @@ class FileTransferManager {
         )
         addTransfer(state)
 
-        onTransferStarted?(transferId, filename, fileSize, true)
+        onTransferStarted?(transferId, filename, fileSize, true, state.url)
 
         var envelope = BridgProtoEnvelope()
         envelope.fileStart = startMsg
@@ -107,7 +107,7 @@ class FileTransferManager {
         // FileHandle(forWritingTo:) throws unless the file already exists.
         FileManager.default.createFile(atPath: targetURL.path, contents: nil)
 
-        onTransferStarted?(transferId, filename, Int64(start.size), false)
+        onTransferStarted?(transferId, filename, Int64(start.size), false, targetURL)
     }
 
     /// Handle a FileChunk from Android.

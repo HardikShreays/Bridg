@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Main content view shown when opening the Bridg window.
 struct ContentView: View {
@@ -84,6 +85,8 @@ struct ContentView: View {
                 .environmentObject(appState)
         }
         .navigationTitle("Bridg")
+        // Drop anywhere in the window to share with the selected phone.
+        .shareDropTarget()
     }
 
     private var connectionIcon: String {
@@ -327,8 +330,20 @@ struct FileTransferView: View {
             }
 
             if appState.activeTransfers.isEmpty {
-                Text("No active transfers")
-                    .foregroundColor(.secondary)
+                // The whole window already accepts drops (see ShareDropTarget);
+                // this is the visible cue that this pane is the place for it.
+                VStack(spacing: 10) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.system(size: 40))
+                        .foregroundColor(.secondary)
+                    Text("No active transfers")
+                        .font(.headline)
+                    Text("Drag files anywhere in this window to send them to \(appState.selectedPhone?.name ?? "your phone")")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(appState.activeTransfers) { transfer in
                     HStack {
@@ -355,6 +370,141 @@ struct FileTransferView: View {
         }
         .padding(.top, appState.lastTransferError != nil ? 8 : 0)
         .navigationTitle("File Transfer")
+    }
+}
+
+/// Drop anywhere in the app window to share with the selected phone:
+/// files and images transfer as files, web links open on the phone, and
+/// plain text is wrapped in a .txt and transferred.
+struct ShareDropTarget: ViewModifier {
+    @EnvironmentObject var appState: AppState
+    @State private var isTargeted = false
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                if isTargeted {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 14)
+                            .fill(.ultraThinMaterial)
+                        RoundedRectangle(cornerRadius: 14)
+                            .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 3, dash: [10]))
+                            .padding(6)
+                        VStack(spacing: 10) {
+                            Image(systemName: "arrow.up.circle.fill")
+                                .font(.system(size: 44))
+                                .foregroundStyle(Color.accentColor)
+                            Text(dropHint)
+                                .font(.headline)
+                        }
+                    }
+                    .padding(10)
+                    // The overlay must not swallow the drag; let it flow to
+                    // the drop target underneath.
+                    .allowsHitTesting(false)
+                }
+            }
+            .onDrop(
+                of: [UTType.fileURL, UTType.data, UTType.url, UTType.plainText],
+                isTargeted: $isTargeted,
+                perform: handleDrop
+            )
+    }
+
+    private var dropHint: String {
+        if let phone = appState.selectedPhone, phone.connected {
+            return "Drop to send to \(phone.name)"
+        }
+        return "Drop to share"
+    }
+
+    private func handleDrop(providers: [NSItemProvider]) -> Bool {
+        var accepted = false
+        for provider in providers {
+            // Order matters: a file usually also advertises plain-text and
+            // data representations, so prefer the richest one.
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                accepted = true
+                loadFile(provider)
+            } else if provider.hasItemConformingToTypeIdentifier(UTType.data.identifier) {
+                accepted = true
+                loadData(provider)
+            } else if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) {
+                accepted = true
+                loadURL(provider)
+            } else if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) {
+                accepted = true
+                loadText(provider)
+            }
+        }
+        return accepted
+    }
+
+    /// A file from Finder or another app's window.
+    private func loadFile(_ provider: NSItemProvider) {
+        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+            guard let url = ShareDropTarget.fileURL(from: item) else { return }
+            Task { @MainActor in self.appState.sendFiles([url]) }
+        }
+    }
+
+    /// Raw data (e.g. an image copied out of a photo library). The temp URL
+    /// only survives inside the callback, so copy before handing it over.
+    private func loadData(_ provider: NSItemProvider) {
+        let type = provider.registeredTypeIdentifiers.first {
+            UTTypeConformsTo($0 as CFString, UTType.data.identifier as CFString)
+        } ?? UTType.data.identifier
+        provider.loadFileRepresentation(forTypeIdentifier: type) { url, _ in
+            guard let url else { return }
+            let dest = FileManager.default.temporaryDirectory
+                .appendingPathComponent("\(Int(Date().timeIntervalSince1970)) \(url.lastPathComponent)")
+            try? FileManager.default.removeItem(at: dest)
+            guard (try? FileManager.default.copyItem(at: url, to: dest)) != nil else { return }
+            Task { @MainActor in self.appState.sendFiles([dest]) }
+        }
+    }
+
+    /// A web link — open it on the phone instead of sending a file.
+    private func loadURL(_ provider: NSItemProvider) {
+        provider.loadItem(forTypeIdentifier: UTType.url.identifier, options: nil) { item, _ in
+            let url = (item as? URL)
+                ?? (item as? Data).flatMap { try? URL(dataRepresentation: $0, relativeTo: nil) }
+                ?? (item as? String).flatMap { URL(string: $0) }
+            guard let url else { return }
+            Task { @MainActor in
+                if !self.appState.openOnPhone(url: url.absoluteString),
+                   !self.appState.connectionState.isConnected {
+                    self.appState.lastTransferError = "No phone connected — connect a phone, then try again."
+                }
+            }
+        }
+    }
+
+    private func loadText(_ provider: NSItemProvider) {
+        provider.loadItem(forTypeIdentifier: UTType.plainText.identifier, options: nil) { item, _ in
+            let text = (item as? String) ?? (item as? Data).flatMap { String(data: $0, encoding: .utf8) }
+            guard let text, !text.isEmpty else { return }
+            Task { @MainActor in self.appState.sendTextToPhone(text) }
+        }
+    }
+
+    /// fileURL items can arrive as a URL, a string, file-url data, or a
+    /// security-scoped bookmark.
+    static func fileURL(from item: Any?) -> URL? {
+        if let url = item as? URL { return url }
+        if let data = item as? Data {
+            if let url = URL(dataRepresentation: data, relativeTo: nil), url.isFileURL { return url }
+            var stale = false
+            if let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) { return url }
+        }
+        if let string = item as? String, let url = URL(string: string), url.isFileURL { return url }
+        return nil
+    }
+}
+
+extension View {
+    func shareDropTarget() -> some View {
+        modifier(ShareDropTarget())
     }
 }
 
