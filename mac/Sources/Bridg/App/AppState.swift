@@ -44,11 +44,23 @@ final class AppState: ObservableObject {
     private let phoneDialer = PhoneDialer()
 
     /// Where the share extension (Finder right-click → Share → Bridg) drops
-    /// items. The extension and this app must agree on the path — see
+    /// items: inside the EXTENSION's own sandbox container, because a sandboxed
+    /// process cannot write anywhere else reliably (homeDirectoryForCurrentUser
+    /// resolves to the container, and temporary-exception entitlements are not
+    /// honored without a provisioning profile). This app is not sandboxed, so it
+    /// reads the extension's container path directly. Must match
+    /// ShareExtension.inboxURL() and the extension's bundle ID — see
     /// ShareExtension.swift.
-    private let shareInbox = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("Bridg", isDirectory: true)
+    private let shareInbox = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Containers/com.bridg.mac.BridgShare/Data/Library/Application Support/Bridg", isDirectory: true)
         .appendingPathComponent("ShareInbox", isDirectory: true)
+    /// Legacy inbox from the first design (real home directory). Shares that
+    /// landed there are picked up once and moved to the live inbox.
+    private let legacyShareInboxes: [URL] = [
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Bridg", isDirectory: true)
+            .appendingPathComponent("ShareInbox", isDirectory: true),
+    ]
     /// Shared items are moved here before being sent, and deleted once the
     /// transfer finishes: they are one-off copies, not the user's original.
     private let shareSpool = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -106,6 +118,8 @@ final class AppState: ObservableObject {
 
     /// Send everything the share extension left in the inbox.
     private func processShareInbox() {
+        migrateLegacyInboxes()
+
         // With no connected phone the transfer would fail; leaving the items
         // in the inbox means they go out as soon as a phone connects (the
         // onPhoneConnected hook re-runs this).
@@ -138,6 +152,23 @@ final class AppState: ObservableObject {
     private func removeIfSpooled(_ url: URL) {
         guard url.path.hasPrefix(shareSpool.path + "/") else { return }
         try? FileManager.default.removeItem(at: url)
+    }
+
+    /// Move anything stranded in the pre-container inbox into the live one.
+    /// The old location was unreachable by the extension (sandbox), but shares
+    /// from intermediate builds may still be sitting there.
+    private func migrateLegacyInboxes() {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: shareInbox, withIntermediateDirectories: true)
+        for legacy in legacyShareInboxes {
+            guard let items = try? fm.contentsOfDirectory(at: legacy, includingPropertiesForKeys: nil),
+                  !items.isEmpty else { continue }
+            for item in items {
+                let dest = shareInbox.appendingPathComponent(item.lastPathComponent)
+                try? fm.removeItem(at: dest)
+                try? fm.moveItem(at: item, to: dest)
+            }
+        }
     }
 
     // MARK: - Pairing

@@ -206,17 +206,21 @@ final class ShareExtension: NSObject, NSExtensionRequestHandling {
         return nil
     }
 
-    /// Same location the app reads: ~/Library/Application Support/Bridg/ShareInbox.
+    /// The inbox lives INSIDE the extension's own sandbox container:
+    /// ~/Library/Containers/com.bridg.mac.BridgShare/Data/Library/Application
+    /// Support/Bridg/ShareInbox.
     ///
-    /// Built from the home directory rather than the standard
-    /// applicationSupportDirectory lookup because the extension is App
-    /// Sandbox'ed (PlugInKit requires it): a sandboxed process resolving the
-    /// standard URL would land inside its own container, which the app never
-    /// sees. The home-relative path is granted to the extension with the
-    /// temporary-exception entitlement in make_app.sh.
+    /// It used to be the real home directory via a temporary-exception
+    /// entitlement, but that cannot work: in a sandboxed process
+    /// homeDirectoryForCurrentUser resolves to the container home, and the
+    /// temporary exception itself is not honored for code signed without a
+    /// provisioning profile — every write to the real inbox was denied, so
+    /// shares silently never arrived. Writes inside the extension's own
+    /// container, on the other hand, are always allowed; the app is not
+    /// sandboxed, so it reads the container path directly (see AppState.swift).
     static func inboxURL() -> URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Bridg", isDirectory: true)
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Bridg", isDirectory: true)
             .appendingPathComponent("ShareInbox", isDirectory: true)
     }
 

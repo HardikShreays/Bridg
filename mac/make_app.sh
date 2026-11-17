@@ -23,8 +23,8 @@ cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # --- Share extension -------------------------------------------------------
 # The .appex is what puts Bridg into Finder's right-click "Share" submenu
 # (next to AirDrop, Mail, Messages). It is a separate process that copies the
-# shared items into ~/Library/Application Support/Bridg/ShareInbox and wakes
-# the app; the app then sends them to the selected phone.
+# shared items into its own sandbox container and wakes the app; the app then
+# sends them to the selected phone.
 APPEX="$APP/Contents/PlugIns/BridgShare.appex"
 mkdir -p "$APPEX/Contents/MacOS"
 cp "$SHARE_BIN" "$APPEX/Contents/MacOS/BridgShareExtension"
@@ -39,8 +39,8 @@ cat > "$APPEX/Contents/Info.plist" <<'PLIST'
     <key>CFBundleExecutable</key><string>BridgShareExtension</string>
     <key>CFBundlePackageType</key><string>XPC!</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-    <key>CFBundleShortVersionString</key><string>0.6.0</string>
-    <key>CFBundleVersion</key><string>10</string>
+    <key>CFBundleShortVersionString</key><string>0.6.1</string>
+    <key>CFBundleVersion</key><string>11</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>CFBundleSupportedPlatforms</key><array><string>MacOSX</string></array>
     <key>DTPlatformName</key><string>macosx</string>
@@ -78,8 +78,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleExecutable</key><string>Bridg</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
-    <key>CFBundleShortVersionString</key><string>0.6.0</string>
-    <key>CFBundleVersion</key><string>10</string>
+    <key>CFBundleShortVersionString</key><string>0.6.1</string>
+    <key>CFBundleVersion</key><string>11</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
 
     <!-- Menu bar app: no Dock icon. -->
@@ -119,11 +119,12 @@ PLIST
 IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | grep -oE '"Apple Development: [^"]+"' | head -1 | tr -d '"' || true)"
 
 # --- Sign the share extension first, with its entitlements ------------------
-# PlugInKit only loads sandboxed extensions ("plug-ins must be sandboxed"),
-# and the appex needs read access to the user's shared files plus write access
-# to the shared inbox under the real home directory — without a temporary
-# exception a sandboxed process resolves Application Support inside its own
-# container, which the app never sees.
+# PlugInKit only loads sandboxed extensions ("plug-ins must be sandboxed").
+# The appex drops shared items INSIDE its own sandbox container (writes there
+# are always allowed); the app is not sandboxed and reads that container path
+# directly. A temporary-exception entitlement for the real home directory does
+# not work here: it is not honored for code signed without a provisioning
+# profile, so every write to the real inbox was silently denied.
 ENTITLEMENTS="build/BridgShare.entitlements"
 mkdir -p build
 cat > "$ENTITLEMENTS" <<'ENTS'
@@ -133,8 +134,6 @@ cat > "$ENTITLEMENTS" <<'ENTS'
 <dict>
     <key>com.apple.security.app-sandbox</key><true/>
     <key>com.apple.security.files.user-selected.read-only</key><true/>
-    <key>com.apple.security.temporary-exception.files.home-relative-path.read-write</key>
-    <array><string>Library/Application Support/Bridg/ShareInbox/</string></array>
 </dict>
 </plist>
 ENTS

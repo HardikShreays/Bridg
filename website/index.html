@@ -5,6 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Bridg: your Android phone, on your Mac and PC</title>
 <meta name="description" content="Free, open-source bridge between your Android phone and your Mac or Windows PC. Clipboard sync, file transfer, notifications with reply, calls, and screen mirroring, end-to-end encrypted over your local network.">
+<!-- Privacy-friendly analytics by Plausible -->
+<script async src="https://plausible.io/js/pa-xWhmoRod_5_yau_qmS2Eh.js"></script>
+<script>
+  window.plausible=window.plausible||function(){(plausible.q=plausible.q||[]).push(arguments)},plausible.init=plausible.init||function(i){plausible.o=i||{}};
+  plausible.init()
+</script>
 <meta property="og:title" content="Bridg: your Android phone, on every computer you own">
 <meta property="og:description" content="Clipboard, files, notifications and calls between your Android phone and your Mac and Windows PC, all at once. Open source, encrypted, no cloud.">
 <meta property="og:image" content="icon.png">
@@ -276,6 +282,8 @@ section{padding:100px 0}
 @media (max-width:900px){.dl{grid-template-columns:1fr}}
 
 footer{padding:40px 0 60px;border-top:1px solid var(--line);color:var(--ink3);font-size:14px}
+.live-stats{display:flex;gap:28px;justify-content:center;margin-top:26px;font:14px var(--body);color:var(--ink3)}
+.live-stats b{color:var(--ink);font-weight:700}
 footer .wrap{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
 footer .brand{color:var(--ink);font-size:16px}
 footer .sp{margin-left:auto;display:flex;gap:20px}
@@ -558,6 +566,11 @@ footer a:hover{color:var(--ink)}
         <small>Allow "Install unknown apps" for your browser when asked.</small>
       </div>
     </div>
+    <p class="live-stats reveal" id="live-stats" hidden>
+      <span><b id="stat-downloads">–</b> downloads</span>
+      <span><b id="stat-stars">–</b> GitHub stars</span>
+      <span><b id="stat-downloads-month">–</b> last 30 days</span>
+    </p>
     <p style="text-align:center;margin-top:28px">
       <a class="btn" href="https://youtu.be/qsm7TjypE4o" target="_blank" rel="noopener">▶ Watch the setup video</a>
     </p>
@@ -595,6 +608,38 @@ fetch('https://api.github.com/repos/HardikShreays/Bridg/releases/latest')
     if (exe) document.querySelectorAll('[data-windows]').forEach(a => a.href = exe.browser_download_url);
   })
   .catch(() => {});
+
+// Live stats for the Download section: all-time downloads across every
+// release, downloads in the last 30 days, and GitHub stars. Fetched live from
+// the public GitHub API — no account, no tracking. Silently hidden on failure.
+(async () => {
+  try {
+    const releases = [];
+    let page = 1;
+    for (;;) {
+      const r = await fetch(`https://api.github.com/repos/HardikShreays/Bridg/releases?per_page=100&page=${page++}`);
+      if (!r.ok) return;
+      const batch = await r.json();
+      releases.push(...batch);
+      if (batch.length < 100) break;
+    }
+    const monthAgo = Date.now() - 30 * 864e5;
+    let total = 0, month = 0;
+    for (const rel of releases) for (const a of rel.assets) {
+      total += a.download_count;
+      if (new Date(a.updated_at) >= monthAgo) month += a.download_count;
+    }
+    const repo = await fetch('https://api.github.com/repos/HardikShreays/Bridg').then(r => r.ok ? r.json() : null);
+    if (!total && !repo) return;
+    const fmt = n => n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1).replace(/\.0$/, '') + 'k' : String(n);
+    document.getElementById('stat-downloads').textContent = fmt(total);
+    document.getElementById('stat-downloads-month').textContent = fmt(month);
+    if (repo) document.getElementById('stat-stars').textContent = fmt(repo.stargazers_count);
+    document.getElementById('live-stats').hidden = false;
+  } catch { /* keep the strip hidden */ }
+})();
+
+// Privacy-friendly visitor analytics: Plausible (script in <head>).
 
 // Fade sections in as they scroll into view.
 const io = new IntersectionObserver(es => es.forEach(e => {
